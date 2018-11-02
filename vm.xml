@@ -1,0 +1,31 @@
+<domain type='kvm'>
+    <name>NAME</name>
+    <os>
+      <type>hvm</type>
+      <kernel>KERNEL</kernel>
+      <initrd>INITRD</initrd>
+      <cmdline>CMDLINE</cmdline>
+    </os>
+    <features>
+      <acpi/>
+      <apic/>
+    </features>
+    <memory unit='MB'>TBD</memory>
+    <devices>
+      <serial type='pty'>
+        <target port='0'/>
+      </serial>
+      <channel type="tcp">
+          <source mode="bind" host="0.0.0.0" service="TBD"/>
+          <protocol type="raw"/>
+          <target type="virtio" name="org.ktest.channel.0"/>
+      </channel>
+      <console type='pty'>
+        <target type='serial' port='0'/>
+      </console>
+      <controller type='scsi' index='0' model='virtio-scsi'/>
+      <rng model='virtio'>
+        <backend model='random'>/dev/random</backend>
+      </rng>
+    </devices>
+</domain>

@@ -1,0 +1,9 @@
+[Unit]
+Description=ktest cmdline
+Conflicts=shutdown.target emergency.target
+Before=shutdown.target emergency.target
+After=systemd-journald.service
+
+[Service]
+ExecStart=/bin/ktest-cmdline
+Type=oneshot

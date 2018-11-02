@@ -1,0 +1,12 @@
+[Unit]
+Description=DHCP Client
+Before=ktest.service
+After=systemd-udev-settle.service ktest-cmdline.service
+Wants=systemd-udev-settle.service ktest-cmdline.service
+ConditionKernelCommandLine=ktest.dhcp
+
+[Service]
+Type=forking
+EnvironmentFile=/etc/dhclient
+PIDFile=/var/run/dhclient.pid
+ExecStart=/sbin/dhclient $INTERFACES

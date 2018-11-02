@@ -1,0 +1,75 @@
+#!/bin/bash
+#
+# Copyright (c) 2018 YADRO
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+
+FS="$1"
+
+clean() {
+    losetup -d "$ldev_path"
+}
+set -e
+echo ',,,;' | sfdisk "$2"
+if ! losetup -f &>/dev/null; then
+    echo "Can't find unused loop device" >&2
+    exit 1
+fi
+ldev_path=$(losetup -f -P --show "$2")
+echo Working with $ldev_path
+ldev=${ldev_path#/dev/}
+part=${ldev}p1
+part_dev_path=/sys/class/block/${part}/dev
+if [ ! -r $part_dev_path ]; then
+    echo "Can't find partition: $part" >&2
+    clean
+    exit 1
+fi
+
+# Workaround for https://github.com/moby/moby/issues/16160
+if [ ! -e "/dev/$part" ]; then
+    IFS=':' read -r -a part_dev < "$part_dev_path"
+    mknod "/dev/$part" b ${part_dev[0]} ${part_dev[1]}
+fi
+
+if ! mkfs.$FS "/dev/$part"; then
+    clean
+    exit 1
+fi
+
+case $FS in
+    xfs)
+        xfs_admin -U $3 /dev/$part
+        ;;
+    ext2|ext3|ext4)
+        tune2fs -U $3 /dev/$part
+        ;;
+    *)
+        echo "Don't how to set UUID for $FS" >&2
+        clean
+        exit 1
+esac
+
+if [ -n "$4" ]; then
+    if [ ! -d "$4" ]; then
+        clean
+        echo "$4 is not a directory" >&2
+        exit 1
+    fi
+    mp=/tmp/$(tr / - <<< "$4")
+    mkdir -p "$mp"
+    mount -t $FS "/dev/$part" "$mp"
+    cp -a "$4/." "$mp"
+    umount "$mp"
+fi
+clean

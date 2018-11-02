@@ -1,0 +1,59 @@
+if grep -q "crashkernel=\S\+" < /proc/cmdline; then
+    KTEST_KDUMP=1
+    echo "ktest: Setting up kdump" > /dev/kmsg
+    case `uname -m` in
+        x86_64)
+            CMDLINE="console=ttyS0 maxcpus=1 reset_devices"
+            KEXEC_OPTS="--console-serial"
+            ;;
+        ppc64le)
+            CMDLINE="console=hvc0 maxcpus=1 noirqdistrib reset_devices"
+            ;;
+        *)
+            ;;
+    esac
+    CMDLINE="${CMDLINE} $(grep -oP '\Kktest.crashdrive=\S+' </proc/cmdline)"
+    kexec -p /boot/vmlinu[x,z]        \
+          --initrd /boot/initrd-kdump \
+          --append "$CMDLINE"         \
+          $KEXEC_OPTS
+fi
+
+for mp in $(grep -oP 'ktest.mount=\K\S+' </proc/cmdline); do
+    fs=$(echo $mp | cut -d: -f 2)
+    uuid=$(echo $mp | cut -d: -f 1)
+    mount_point=$(echo $mp | cut -d: -f 3)
+    mkdir -p $mount_point
+    echo "ktest: Mounting $uuid at $mount_point" > dev/kmsg
+    mount -t $fs -U $uuid $mount_point
+done
+
+HOSTPWD=$(grep -oP 'ktest.pwd=\K\S+' < /proc/cmdline)
+if [ -n "$HOSTPWD" ]; then
+    export KTEST_PWD="$HOSTPWD"
+fi
+
+ENTRY_POINT=$(grep -oP 'ktest.start=\K\S+' < /proc/cmdline)
+export KTEST_OUTPUT=/ktest/out
+mkdir -p "$KTEST_OUTPUT"
+if [ -n "$ENTRY_POINT" ]; then
+    if [ -x "$ENTRY_POINT" ]; then
+        "$ENTRY_POINT"
+        echo $? > "$KTEST_OUTPUT/exit-code"
+        dmesg | gzip -c > "$KTEST_OUTPUT/dmesg.gz"
+        tar -cz -C "$KTEST_OUTPUT" . > /dev/virtio-ports/org.ktest.channel.0
+    else
+        echo "ktest: Can't find entry point: '$ENTRY_POINT'"
+        poweroff
+    fi
+fi
+
+if ! grep -q ktest.keep < /proc/cmdline; then
+    poweroff
+else
+    echo
+    echo "Welcome to ktest shell"
+    echo
+fi
+
+# vim: ft=sh

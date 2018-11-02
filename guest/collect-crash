@@ -1,0 +1,58 @@
+#
+# Copyright (c) 2018 YADRO
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+modprobe virtio_pci
+modprobe virtio_blk
+modprobe virtio_console
+
+crashdrive=$(grep -oP 'ktest.crashdrive=\K\S+' </proc/cmdline)
+if [ "$crashdrive" != "" ]; then
+    fs=$(echo $crashdrive | cut -d: -f 2)
+    uuid=$(echo $crashdrive | cut -d: -f 1)
+    mount_point=$(echo $crashdrive | cut -d: -f 3)
+    mkdir -p $mount_point
+    echo "ktest: mount crashdrive $uuid at $mount_point" > /dev/kmsg
+    mount -t $fs -U $uuid $mount_point
+
+    core_dst="$mount_point/crash.dump"
+    echo "ktest: save crash to $core_dst" > /dev/kmsg
+    makedumpfile -c -d 31 /proc/vmcore "$core_dst"
+
+    dmesg_dst="$mount_point/dmesg.gz"
+    echo "ktest: save dmesg to $dmesg_dst" > /dev/kmsg
+    vmcore-dmesg /proc/vmcore | gzip -c > "$dmesg_dst"
+
+    VP_CLASS=/sys/class/virtio-ports
+    CHANNEL_NAME="org.ktest.channel.0"
+    for p in $(ls -1 $VP_CLASS); do
+        port_name=$(cat $VP_CLASS/$p/name)
+        if [ "$port_name" == "$CHANNEL_NAME" ]; then
+            channel_dev=$p
+        fi
+    done
+    if [ -n "$channel_dev" ]; then
+        tar -cz -C "$mount_point" . > /dev/$channel_dev
+    else
+        echo "ktest: Can't find channel device for $CHANNEL_NAME"
+    fi
+    rm -rf "$mount_point"/*
+
+    umount "$mount_point"
+else
+    echo "ktest: crashdrive was not found" > /dev/kmsg
+fi
+
+echo o > /proc/sysrq-trigger
+
+# vim: ft=sh

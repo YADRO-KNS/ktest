@@ -1,0 +1,202 @@
+#!/bin/bash
+#
+# Copyright (c) 2018 YADRO
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+set -e
+
+declare -a POSITIONAL
+declare -a INCLUDES
+declare -a DRACUT_OPTS
+declare -a KMODS
+CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
+GUEST="$CURDIR/guest"
+KMODS+=(virtio_pci virtio_net virtio_blk virtio_scsi virtio_console virtio-rng sg sd_mod)
+MODULES=(base systemd terminfo)
+INSTALL=(zcat zless zgrep grep gzip cut sed awk tr ps tar)
+source "$CURDIR/lib"
+systemddir=/usr/lib/systemd
+sysunitdir="$systemddir/system"
+targetdeps="$sysunitdir/multi-user.target.wants"
+
+usage() {
+    cat <<EOF
+Usage: $0 [options] <out-file> <kernel-image>
+
+Options:
+  -k, --with-kdump         Build kdump kernel
+  -v, --verbose            Extra output
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --with-kdump|-k)
+            KDUMP=1
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=-v
+            shift
+            ;;
+        --kmoddir)
+            DRACUT_OPTS+=(-k "$2")
+            shift 2
+            ;;
+        --fwdir)
+            DRACUT_OPTS+=(--fwdir "$2")
+            shift 2
+            ;;
+        --module|-m)
+            KMODS+=($2)
+            shift 2
+            ;;
+        --install|-i)
+            if [ -x "$(pwd)/$2" ]; then
+                INSTALL+=($(realpath "$(pwd)/$2"))
+            else
+                INSTALL+=("$2")
+            fi
+            shift 2
+            ;;
+        --include|-I)
+            src=$(cut -d: -f1 <<< "$2")
+            if [ ! -r "$src" ]; then
+                die "Can't find file at '$src'"
+            fi
+            dst=$(cut -d: -f2 <<< "$2")
+            DRACUT_OPTS+=(--include $src $dst)
+            shift 2
+            ;;
+        --net)
+            NETWORK=y
+            shift
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ ${#POSITIONAL[@]} -ne 2 ]; then
+    usage
+    exit 1
+fi
+OUT="${POSITIONAL[0]}"
+KIMG="${POSITIONAL[1]}"
+[ -r "$KIMG" ] || die "Can't read kernel: $KIMG"
+KVER=$(strings "$KIMG" | grep -oP 'Linux version \K\S+') || :
+[ -z "$KVER" ] && KVER=$(file "$KIMG" | grep -oP ', Version \K\S+') || :
+[ -n "$KVER" ] || die "Can't extract kernel version from: $KIMG"
+emptydir=$(mktemp -d)
+ktestdir=$(mktemp -d)
+entrypoint="$GUEST/profile"
+
+check_progs() {
+    local notfound=0
+    for prog in "$@"; do
+        if ! which "$prog" 2>/dev/null 1>&2; then
+            echo "ERROR: Can't find \"$prog\" in \$PATH"
+            ((notfound++))
+        fi
+    done
+    if ((notfound > 0)); then
+        die
+    fi
+}
+
+libdirs() {
+    local -a libdirs
+    if [[ $(ldd /bin/sh) == */lib64/* ]] && [ -d /lib64 ]; then
+        libdirs+=(/lib64)
+        [ -d /usr/lib64 ] && libdirs+=(/usr/lib64)
+    else
+        libdirs+=(/lib)
+        [ -d /usr/lib ] && libdirs+=(/usr/lib)
+    fi
+    echo "${libdirs[@]}"
+    return 0
+}
+
+inst_libdir_file() {
+    for ldir in $(libdirs); do
+        for p in "$@"; do
+            match=$(ls $ldir/$p 2>/dev/null) || continue
+            for m in $match; do
+                INCLUDES+=(--include "$m" "$m")
+            done
+        done
+    done
+}
+
+if [ -n "$NETWORK" ]; then
+    NET_INSTALL=(ip dhclient arping ping ping6 hostname)
+    # Install resolver from glibc
+    _arch=$(uname -m)
+    inst_libdir_file {"tls/$_arch/",tls/,"$_arch/",}"libnss_dns.so.*" \
+                     {"tls/$_arch/",tls/,"$_arch/",}"libnss_mdns4_minimal.so.*"
+    INSTALL+=("${NET_INSTALL[@]}")
+    MODULES+=(kernel-network-modules)
+fi
+
+if [ -n "$KDUMP" ]; then
+    bootdir=$(dirname $OUT)/boot
+    mkdir -p "$bootdir"
+    kernel=$(find /boot -name 'vmlinu[x|z]')
+    cp "$kernel" "$bootdir"
+    KDUMP_INSTALL=(gzip vmcore-dmesg makedumpfile scp grep cut tar)
+
+    check_progs "${KDUMP_INSTALL[@]}"
+    dracut -N --force                                                         \
+           "${DRACUT_OPTS[@]}"                                                \
+           -m "base"                                                          \
+           --filesystems "xfs"                                                \
+           --install "${KDUMP_INSTALL[*]}"                                    \
+           --include $emptydir /crashes                                       \
+           --include "$GUEST/collect-crash" /.profile                         \
+           --add-drivers="virtio_pci virtio_net virtio_blk virtio_console"    \
+           $VERBOSE                                                           \
+           "$bootdir/initrd-kdump" "$KVER"
+
+    INCLUDES+=(--include "$bootdir" /boot)
+    INSTALL+=(kexec)
+fi
+
+check_progs "${INSTALL[@]}"
+export DRACUT_RESOLVE_DEPS=1
+dracut -N --force                                                             \
+       "${DRACUT_OPTS[@]}"                                                    \
+       -m "${MODULES[*]}"                                                     \
+       --filesystems "ext2"                                                   \
+       --install "${INSTALL[*]}"                                              \
+       --include $CURDIR/multi-user.target.wants                              \
+                 $sysunitdir/multi-user.target.wants                          \
+       --include $GUEST/cmdline.service $sysunitdir/ktest-cmdline.service     \
+       --include $GUEST/cmdline.sh /bin/ktest-cmdline                         \
+       --include $GUEST/debugfs.mount $sysunitdir/sys-kernel-debug.mount      \
+       --include $emptydir /var/lib/dhcp                                      \
+       --include $GUEST/dhclient-script.sh /sbin/dhclient-script              \
+       --include $GUEST/dhclient.service $sysunitdir/dhclient.service         \
+       --include $entrypoint /.profile                                        \
+       --include $CURDIR/ktest.service $sysunitdir/ktest.service              \
+       --include $CURDIR/ktest.sh /bin/ktest                                  \
+       --include $CURDIR/disk-by-serial /bin/disk-by-serial                   \
+       "${INCLUDES[@]}"                                                       \
+       --add-drivers="${KMODS[*]}"                                            \
+       $VERBOSE                                                               \
+       "$OUT" "$KVER"
+
+if [ -n "$FILE_UID" ]; then
+    chown $FILE_UID $OUT
+fi

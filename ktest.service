@@ -1,0 +1,23 @@
+[Unit]
+Description=ktest Shell
+DefaultDependencies=no
+After=systemd-vconsole-setup.service systemd-udev-settle.service
+Wants=systemd-vconsole-setup.service
+Conflicts=shutdown.target emergency.target
+Before=shutdown.target emergency.target
+
+[Service]
+Environment=HOME=/
+WorkingDirectory=/
+ExecStart=-/bin/ktest
+Type=oneshot
+StandardInput=tty-force
+StandardOutput=inherit
+StandardError=inherit
+KillMode=process
+IgnoreSIGPIPE=no
+TasksMax=infinity
+
+# Bash ignores SIGTERM, so we send SIGHUP instead, to ensure that bash
+# terminates cleanly.
+KillSignal=SIGHUP

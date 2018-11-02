@@ -1,0 +1,23 @@
+#!/bin/sh
+if [ $# -ne 1 ]; then
+    cat <<EOF
+Usage: $0 SERIAL
+
+The command finds block device by serial number
+EOF
+    exit 1
+fi
+
+for d in /sys/block/*; do
+    out=$(udevadm info -q property $d)
+    SERIAL=$(echo "$out" | grep -oP 'ID_SERIAL_SHORT=\K.+')
+    [ -n "$SERIAL" ] || SERIAL=$(echo "$out" | grep -oP 'ID_SERIAL=\K.+')
+    if [ "$SERIAL" == "$1" ]; then
+        echo "$out" | grep -oP 'DEVNAME=\K.+'
+        exit
+    fi
+done
+
+exit 1
+
+# vim: ft=sh

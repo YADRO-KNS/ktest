@@ -1,0 +1,756 @@
+#!/bin/bash
+#
+# Copyright (c) 2018 YADRO
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+set -e
+export LANG=C
+DEPS=(socat xml virsh)
+
+: ${CONFIG:=.ktest}
+if [ -z "$NO_CONFIG" ] && [ -f $CONFIG ]; then
+   . "$CONFIG"
+fi
+
+declare -a POSITIONAL
+: ${OWNER:=$(whoami)}
+: ${POOL:=default}
+: ${FORCE:=}
+DIRS=("${DIRS[@]}")
+DISKS=("${DISKS[@]}")
+INSTALL=("${INSTALL[@]}")
+INCLUDES=("${INCLUDES[@]}")
+MODULES=("${MODULES[@]}")
+BASE_CHANNEL_PORT=10000
+N_CHANNEL_PORTS=999
+: ${MEMORY:=512}
+: ${OUTPUT:=$(mktemp -d)}
+: ${CLEAN:=}
+: ${GDB_ADDRESS:=}
+: ${XML_TEMPLATE:=vm.xml}
+: ${DISABLE_CONSOLE:=}
+: ${DISABLE_KDUMP:=}
+: ${DOCKER_IMAGE:=}
+: ${ENTRY_POINT:=}
+: ${VM_TIMEOUT:=600}
+: ${VCPU:=1}
+: ${KDUMP_TIMEOUT:=180}
+declare -a DISKNAMES
+declare -a KOPT
+declare -a MKINITRD_ARGS
+declare -a VOLUMES
+declare -a IFACES
+declare -a DHCP_IFACES
+CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
+
+source "$CURDIR/cache"
+source "$CURDIR/lib"
+
+log() {
+    set +e
+    loc="$USR_CACHE_DIR/$VMNAME/$1.log"
+    printf "$(date +%Y-%m-%dT%H:%M:%SZ) $*\n" >>"$loc"
+    "$@" >>"$loc" 2>&1 || {
+        rc=$?
+        printf "\n$1 exited with $rc, last log lines:\n"
+        tail "$loc"
+    }
+    set -e
+    return $rc
+}
+
+logq() {
+    loc="$USR_CACHE_DIR/$VMNAME/$1.log"
+    printf "$(date +%Y-%m-%dT%H:%M:%SZ) $*\n" >>"$loc"
+    "$@" >>"$loc" 2>&1
+}
+
+usage() {
+    cat << EOF
+
+Usage: $0 [options] <kernel>
+
+ctrl+] can be used to stop the VM
+
+.ktest file is sourced in current directory and can be used to predefine
+parameters.
+
+options:
+    -h, --help                     print this message and exit
+    -x, --debug                    trace execution
+    --debug-libvirt LEVEL          Set LIBVIRT_DEBUG to LEVEL
+    --disable-console              don't connect to vm console after start
+    --disable-kdump                don't setup kdump
+    -f, --force                    stop running VM
+    -c, --clean                    remove kernel and initramfs volumes after VM
+                                   shutdown
+    -G, --gdb [HOST]:PORT          Enable QEMU GDB stub via HOST:PORT
+    -k, --kopt PARAM               pass a kernel option
+    -K, --keep                     don't shutdown VM immediately
+    --kmoddir DIR                  a directory where to look for kernel modules
+    --fwdir   DIR                  a directory where to find firmware
+    --vcpu NUMBER                  Specify number of virtual CPUs
+    -M, --memory SIZE              Specify amount of memory in megabytes
+    -m, --module MODULE            install a kernel module into initramfs
+    -d, --directory LOCAL:REMOTE   pass a directory and mount it under a path
+    -D, --disk DISKSPEC            Make virtio-scsi/virtio-blk disk that's avaialble from the VM
+                                   DISKSPEC must have the format: NAME:<scsi|blk>:SIZE,
+                                   Where NAME is alphanumeric that'll be used as disk serial,
+                                   SIZE is a number following G, M or K suffix (Gigabytes,
+                                   Megabytes or Kilobytes, respectively).
+    -n, --net NETSPEC              Configure a virtio-net interface and
+                                   optionally acquire IPv4/IPv6 address from DHCP server.
+                                   NETSPEC must have the format: IFSPEC[:mac=ADDR][:dhcp]
+                                   Where IFSPEC is <bridge=NAME|network=NAME|ovs=NAME|user>.
+    -o, --output DIR               A directory to store results
+    -e, --entry-point PATH         start an executable after init is completed
+    -i, --install PROGRAM          install PROGRAM into initramfs
+    -I, --include SRC[:DST]        include a file or directory from SRC into
+                                   inintramfs. Destination in initramfs can be
+                                   specified in DST.
+    --docker-image IMAGE           docker image to build initramfs
+    --uri URI                      set URI to hypervisor
+    --pool POOL                    pool to store the kernel and initramfs
+    --owner OWNER                  owner of the VM
+    -t, --timeout TIMEOUT          VM timeout
+    --kdump-timeout TIMEOUT        Specifies time limit for kernel dump.
+                                   A VM is shut down if it doesn't manage to
+                                   save kdump within the time limit.
+EOF
+}
+
+check_diskspec() {
+    local disk
+    IFS=':' read -ra disk <<< "$1"
+    [ ${#disk[@]} -eq 3 ] || return $?
+    [[ ${disk[0]} =~ ^[[:alnum:]]+$ ]] || return $?
+    [ "${disk[1]}" == blk -o "${disk[1]}" == scsi ] || return $?
+    [[ ${disk[2]} =~ ^[[:digit:]]+[G|M|K]{0,1}$ ]] || return $?
+    [[ " ${DISKNAMES[@]} " =~ " ${disk[0]}" ]] && return 1
+    DISKNAMES+=("${disk[0]}")
+    return
+}
+
+parse_options(){
+    local with_network
+    while [ $# -gt 0 ] ; do
+        if [ "$1" == "-h" -o "$1" == "--help" ] ;  then
+            usage
+            exit 0
+        elif [ "$1" == "-x" -o "$1" == "--debug" ]; then
+            set -x
+            shift
+        elif [ "$1" == "--debug-libvirt" ]; then
+            export LIBVIRT_DEBUG="$2"
+            shift 2
+        elif [ "$1" == "--docker-image" ]; then
+            DOCKER_IMAGE="$2"
+            shift 2
+        elif [ "$1" == "-f" -o "$1" == "--force" ]; then
+            FORCE=1
+            shift
+        elif [ "$1" == "-i" -o "$1" == "--install" ]; then
+            INSTALL+=("$2")
+            shift 2
+        elif [ "$1" == "-I" -o "$1" == "--include" ]; then
+            INCLUDES+=("$2")
+            shift 2
+        elif [ "$1" == "-d" -o "$1" == "--directory" ]; then
+            DIRS+=("$2")
+            shift 2
+        elif [ "$1" == "-D" -o "$1" == "--disk" ]; then
+            if ! check_diskspec $2; then
+                echo "ERROR: Invalid DISKSPEC format: $2" >&2
+                usage
+                exit 1
+            fi
+            DISKS+=("$2")
+            shift 2
+        elif [ "$1" == "-G" -o "$1" == "--gdb" ]; then
+            GDB_ADDRESS="$2"
+            shift 2
+        elif [ "$1" == "-m" -o "$1" == "--module" ]; then
+            MODULES+=("$2")
+            shift 2
+        elif [ "$1" == "--vcpu" ]; then
+            VCPU="$2"
+            shift 2
+        elif [ "$1" == "-M" -o "$1" == "--memory" ]; then
+            MEMORY="$2"
+            shift 2
+        elif [ "$1" == "-n" -o "$1" == "--net" ]; then
+            IFACES+=("$2")
+            with_network=y
+            shift 2
+        elif [ "$1" == "-o" -o "$1" == "--output" ]; then
+            OUTPUT="$2"
+            shift 2
+        elif [ "$1" == "-k" -o "$1" == "--kopt" ]; then
+            KOPT+=("$2")
+            shift 2
+        elif [ "$1" == "--kmoddir" ]; then
+            MKINITRD_ARGS+=(--kmoddir "$2")
+            shift 2
+        elif [ "$1" == "--fwdir" ]; then
+            MKINITRD_ARGS+=(--fwdir "$2")
+            shift 2
+        elif [ "$1" == "-e" -o "$1" == "--entry-point" ]; then
+            ENTRY_POINT="$2"
+            shift 2
+        elif [ "$1" == "-K" -o "$1" == "--keep" ]; then
+            [ -t 1 ] && KOPT+=("ktest.keep")
+            shift
+        elif [ "$1" == "--disable-kdump" ]; then
+            DISABLE_KDUMP=y
+            shift
+        elif [ "$1" == "--no-console" ]; then
+            DISABLE_CONSOLE=y
+            shift
+        elif [ "$1" == "--pool" ]; then
+            POOL="$2"
+            shift 2
+        elif [ "$1" == "--uri" ]; then
+            export LIBVIRT_DEFAULT_URI="$2"
+            shift 2
+        elif [ "$1" == "--owner" ]; then
+            OWNER="$2"
+            shift 2
+        elif [ "$1" == "-t" -o "$1" == "--timeout" ]; then
+            VM_TIMEOUT="$2"
+            shift 2
+        elif [ "$1" == "--kdump-timeout" ]; then
+            KDUMP_TIMEOUT="$2"
+            shift 2
+        else
+            POSITIONAL+=("$1")
+            shift
+        fi
+    done
+    if [ ${#POSITIONAL[@]} -ne 1 ]; then
+        usage
+        exit 1
+    fi
+
+    KERNEL="${POSITIONAL[0]}"
+    [ -r "$KERNEL" ] || die "Can't read kernel: $KERNEL"
+    [ -n "$ENTRY_POINT" ] && KOPT+=("ktest.start=$ENTRY_POINT")
+    [ -z "$DISABLE_CONSOLE" ] && CONSOLE="--console"
+    [[ $VM_TIMEOUT =~ ^[0-9]+$ ]] || die "Invalid timeout: $VM_TIMEOUT"
+    if [ -z "$DISABLE_KDUMP" ]; then
+        MKINITRD_ARGS+=("--with-kdump")
+        KOPT+=("crashkernel=0M-2G:128M,2G-6G:256M,6G-8G:512M,8G-:768M")
+    fi
+
+    if [ -n "$GDB_ADDRESS" ] && ! [[ $GDB_ADDRESS =~ ^.+:.+$ ]]; then
+        GDB_ADDRESS=":$GDB_ADDRESS"
+    fi
+
+    for p in "${INSTALL[@]}"; do
+        MKINITRD_ARGS+=(--install "$p")
+        [ -x "$(pwd)/$2" ] && SET_HOST_PWD=1
+    done
+    [ -n "$SET_HOST_PWD" ] && KOPT+=("ktest.pwd=$(pwd)")
+
+    for i in "${INCLUDES[@]}"; do
+        MKINITRD_ARGS+=(--include "$i")
+    done
+
+    for m in "${MODULES[@]}"; do
+        MKINITRD_ARGS+=(-m "$m")
+    done
+
+    for dir in "${DIRS[@]}"; do
+        local local_path=$(lpath "$dir")
+        [ -n "$local_path" ] || die "Local path is empty"
+        [ -d "$local_path" ] || die "Can't find a directory under: $local_path"
+        local remote_path=$(rpath "$dir")
+        [ -n "$remote_path" ] || die "Remote path is empty"
+    done
+
+    [ -n "$with_network" ] && MKINITRD_ARGS+=(--net)
+
+    [ -e "$OUTPUT" ] && rm -rf "$OUTPUT"
+    mkdir -p "$OUTPUT"
+
+    VMNAME="ktest-$OWNER"
+    KERNEL_VOLUME="kernel-$OWNER"
+    INITRAMFS_VOLUME="initramfs-$OWNER"
+    CRASH_VOLUME="crashes-$OWNER"
+
+    for dep in "${DEPS[@]}"; do
+        which $dep &>/dev/null || die "$dep is not installed"
+    done
+}
+
+vm::destroy() {
+    notify "Stop VM: $1"
+    logq virsh destroy "$1" || true
+}
+
+vm::remove(){
+    vm::destroy "$1"
+    vm::undefine "$1"
+}
+
+vm::undefine() {
+    notify "Remove VM: $1"
+    logq virsh undefine "$1" || true
+}
+
+vm::define() {
+    notify "Create VM: $2"
+    log virsh define "$3"
+    cp "$3" $(vm::cached_xml "$1" "$2")
+}
+
+vm::redefine() {
+    vm::undefine "$2"
+    vm::define "$1" "$2" "$3"
+}
+
+vm::start(){
+    notify "Start VM: $1"
+    virsh start "$1" --paused >/dev/null 2>$USR_CACHE_DIR/$VMNAME/start.log
+}
+
+ktest::lock(){
+    notify "Wait for ktest-$HOST.lock"
+    while ! logq virsh vol-create-as $POOL ktest-$HOST.lock 0; do sleep 1; done
+}
+
+ktest::unlock(){
+    logq virsh vol-delete ktest-$HOST.lock $POOL || true
+}
+
+devsuffix() {
+    local i="$1"
+    local id
+    while [ "$i" -ne 0 ]; do
+        id="$(printf "\x$(printf "%x" $((97 + (i - 1) % 26)))")$id"
+        i=$((i / 26))
+    done
+    echo $id
+}
+
+make_xml(){
+    local console
+    local xml=$(mktemp)
+    cp "$CURDIR/$XML_TEMPLATE" "$xml"
+    if [ "$2" == ppc64 ]; then
+        console=hvc0
+    else
+        console=ttyS0
+    fi
+
+    xml ed --inplace --update "/domain/name" -v "$1" "$xml"
+    xml ed --inplace --update "/domain/@type" -v "$3" "$xml"
+    xml ed --inplace --update "/domain/os/kernel" -v "$5" "$xml"
+    xml ed --inplace --update "/domain/os/initrd" -v "$6" "$xml"
+    IFS='|' read -ra vdefs <<<"$7"
+    local vidx=1
+    local sidx=1
+    for vdef in "${vdefs[@]}"; do
+        IFS=':' read -ra v <<<"$vdef"
+        [ -z "${v[3]}" ] && continue
+        if [ ${v[3]} == "blk" ]; then
+            local dev=vd$(devsuffix $vidx)
+            local bus=virtio
+            ((vidx++))
+        else
+            local dev=sd$(devsuffix $sidx)
+            local bus=scsi
+            ((sidx++))
+        fi
+        xml ed --inplace                                                      \
+            -s //devices -t elem -n disk -v ''                                \
+            -a '//devices/disk[last()]' -t attr -n type -v volume             \
+            -a '//devices/disk[last()]' -t attr -n device -v disk             \
+            -s '//devices/disk[last()]' -t elem -n driver -v ''               \
+            -a '//devices/disk[last()]/driver' -t attr -n name -v qemu        \
+            -a '//devices/disk[last()]/driver' -t attr -n type -v "${v[2]}"   \
+            -s '//devices/disk[last()]' -t elem -n source -v ''               \
+            -a '//devices/disk[last()]/source' -t attr -n pool -v "$4"        \
+            -a '//devices/disk[last()]/source' -t attr -n volume -v "${v[0]}" \
+            -s '//devices/disk[last()]' -t elem -n target -v ''               \
+            -a '//devices/disk[last()]/target' -t attr -n bus -v $bus         \
+            -a '//devices/disk[last()]/target' -t attr -n dev -v $dev         \
+            "$xml"
+
+        if [ -n "${v[4]}" ]; then
+            xml ed --inplace                                                  \
+                -s '//devices/disk[last()]' -t elem -n serial -v "${v[4]}"    \
+                "$xml"
+        fi
+    done
+
+    IFS='|' read -ra idefs <<<"$8"
+    local ifix=0
+    for idef in "${idefs[@]}"; do
+        IFS=':' read -ra i <<<"$idef"
+        local lastif='//devices/interface[last()]'
+        xml ed --inplace                                                      \
+            -s //devices -t elem -n interface -v ''                           \
+            "$xml"
+        if [[ ${i[0]} =~ ^ovs=([^[:space:]]+)$ ]]; then
+            xml ed --inplace                                                  \
+                -a "$lastif" -t attr -n type -v bridge                        \
+                -s "$lastif" -t elem -n source -v ''                          \
+                -a "$lastif/source" -t attr -n bridge -v "${BASH_REMATCH[1]}" \
+                -s "$lastif" -t elem -n virtualport -v ''                     \
+                -a "$lastif/virtualport" -t attr -n type -v openvswitch       \
+                -s "$lastif" -t elem -n model -v ''                           \
+                -a "$lastif/model" -t attr -n type -v virtio                  \
+                "$xml"
+        elif [[ ${i[0]} =~ ^user$ ]]; then
+            xml ed --inplace                                                  \
+                -a "$lastif" -t attr -n type -v user                          \
+                -s "$lastif" -t elem -n model -v ''                           \
+                -a "$lastif/model" -t attr -n type -v virtio                  \
+                "$xml"
+        fi
+        if [ "${i[1]}" == dhcp ]; then
+            DHCP_IFACES+=($ifix)
+        fi
+        ((ifix++))
+    done
+    if [ ${#DHCP_IFACES[@]} -ne 0 ]; then
+        local dhcp="ktest.dhcp=$(join_by ',' ${DHCP_IFACES[@]})"
+    fi
+    xml ed --inplace --update "/domain/os/cmdline" -v "unknown_nmi_panic console=$console $dhcp ${*:9}" "$xml"
+
+    echo "$xml"
+}
+
+vm::vol::upload(){
+    if ! logq virsh vol-info "$1" --pool "$POOL"; then
+        notify "Create volume $1 on $POOL"
+        local size=$(wc -c < "$2")
+        log virsh vol-create-as --format "$3" "$POOL" "$1" $size
+    fi
+    if cache::file::outdated "$2" "$HOST" "$POOL" "$1" || [ -n "$FORCE" ]; then
+        notify "Upload $2 to hypervisor"
+        log virsh vol-upload "$1" "$2" --pool "$POOL"
+        cache::file::update "$2" "$HOST" "$POOL" "$1"
+    fi
+}
+
+vm::cached_xml() {
+    echo "$USR_CACHE_DIR/$1-$2.xml"
+}
+
+vm::insync() {
+    cmp -s $(vm::cached_xml "$1" "$2") "$3"
+}
+
+run_mkinitrd() {
+    local arg_cache=$USR_CACHE_DIR/$VMNAME/mkinitrd.args
+    echo "$DOCKER_IMAGE" "$@" > "$arg_cache.tmp"
+    if [ -e "$arg_cache" ] && cmp -s "$arg_cache" "$arg_cache.tmp" && [ -z "$FORCE" ]; then
+        notify "Skip initrd generation"
+        return
+    fi
+    if [ -n "$DOCKER_IMAGE" ]; then
+        docker run --rm                        \
+            -e FILE_UID=$(id -u)               \
+            -v $(pwd):$(pwd)                   \
+            -v "$CURDIR":/ktest                \
+            -v "$USR_CACHE_DIR:$USR_CACHE_DIR" \
+            -w $(pwd)                          \
+            "$DOCKER_IMAGE"                    \
+            /ktest/mkinitrd "$@"
+    else
+        "$CURDIR/mkinitrd" "$@"
+    fi
+    mv "$arg_cache.tmp" "$arg_cache"
+}
+
+lpath() {
+    cut -d: -f1 <<< "$1"
+}
+
+rpath() {
+    cut -d: -f2 <<< "$1"
+}
+
+run_mkdrive() {
+    echo "$@" > "$1.args.tmp"
+    if [ -n "$5" ]; then
+        tar c $5 | shasum | cut -d' ' -f 1 > "$1.hash.tmp"
+    fi
+    [ -z "$FORCE" ] && if [ -z "$5" ]; then
+        if cmp -s "$1.args" "$1.args.tmp"; then
+            notify "Skip $1 generation"
+            return
+        fi
+    else
+        if cmp -s "$1.args" "$1.args.tmp" && cmp -s "$1.hash" "$1.hash.tmp"; then
+            notify "Skip $1 generation"
+            return
+        fi
+    fi
+    log qemu-img create -f raw "$1.tmp" $2
+    if [ -n "$DOCKER_IMAGE" ]; then
+        if [ -n "$5" ]; then
+            local targetdir=$(realpath $5)
+            local targetvol=(-v "$targetdir:$targetdir")
+        fi
+        docker run --rm                               \
+                   ${targetvol[@]}                    \
+                   -v "$CURDIR":/ktest                \
+                   -v "$USR_CACHE_DIR:$USR_CACHE_DIR" \
+                   --privileged                       \
+                   "$DOCKER_IMAGE"                    \
+                   /ktest/mkfs $3 "$1.tmp" $4 $targetdir
+    else
+        "$CURDIR/mkfs" $3 "$1.tmp" $4 $5
+    fi
+    log qemu-img convert -f raw -O qcow2 "$1.tmp" "$1"
+    rm "$1.tmp"
+    mv "$1.args.tmp" "$1.args"
+    if [ -n "$5" ]; then
+        mv "$1.hash.tmp" "$1.hash"
+    fi
+}
+
+drive_uuid() {
+    local uuid
+    [ -r "$1" ] && uuid=$(<"$1") || :
+    if [ -z "$uuid" -o -n "$FORCE" ]; then
+        echo $(uuidgen) | tr [:upper:] [:lower:] | tee "$1"
+    else
+        echo $uuid
+    fi
+}
+
+xml::channelport::set() {
+  local xml=$1
+  local port=$2
+  xml ed --inplace --update '//channel[@type="tcp"][child::target[@name="org.ktest.channel.0"]]/source/@service' -v $port "$xml"
+}
+
+xml::vcpu::set() {
+  local xml=$1
+  local vcpu=$2
+  xml ed --inplace -s /domain -t elem -n vcpu -v "$vcpu" "$xml"
+}
+
+xml::memory::set() {
+  local xml=$1
+  local memory=$2
+  xml ed --inplace --update '//domain/memory' -v "$memory" "$xml"
+}
+
+xml::gdb::set() {
+  local xml=$1
+  local addr=$2
+  local qemuns="http://libvirt.org/schemas/domain/qemu/1.0"
+  # xml starlet can't add subnode to a new element within a namaspace
+  # probably will need to file a bug
+  xml ed --inplace -a /domain -t attr -n xmlns:qemu -v "$qemuns"              \
+                   -s /domain -t elem -n qemu:commandline -v ''               \
+                   "$xml"
+  xml ed --inplace -N qemu="$qemuns"                                          \
+                   -s //qemu:commandline -t elem -n qemu:arg -v ''            \
+                   "$xml"
+  xml ed --inplace -N qemu="$qemuns"                                          \
+                   -a '//qemu:arg[last()]' -t attr -n value -v "-gdb"         \
+                   "$xml"
+  xml ed --inplace -N qemu="$qemuns"                                          \
+                   -s //qemu:commandline -t elem -n qemu:arg -v ''            \
+                   "$xml"
+  xml ed --inplace -N qemu="$qemuns"                                          \
+                   -a '//qemu:arg[last()]' -t attr -n value -v "tcp:$addr"    \
+                   "$xml"
+}
+
+parse_options $*
+
+mkdir -p "$USR_CACHE_DIR/$VMNAME"
+
+VOLUMES+=("$KERNEL_VOLUME:$KERNEL:raw:")
+
+INITRAMFS="$USR_CACHE_DIR/$VMNAME/initrd"
+run_mkinitrd ${MKINITRD_ARGS[@]} "$INITRAMFS" "$KERNEL"
+VOLUMES+=("$INITRAMFS_VOLUME:$INITRAMFS:raw:")
+
+CRASHDRIVE="$USR_CACHE_DIR/$VMNAME/crash.qcow2"
+CRASHDRIVE_UUID=$(drive_uuid "$USR_CACHE_DIR/$VMNAME/crash.uuid")
+run_mkdrive "$CRASHDRIVE" 5G xfs $CRASHDRIVE_UUID
+VOLUMES+=("$CRASH_VOLUME:$CRASHDRIVE:qcow2:blk")
+KOPT+=("ktest.crashdrive=$CRASHDRIVE_UUID:xfs:/crashes")
+
+for dir in "${DIRS[@]}"; do
+    fs=ext2
+    local_path=$(lpath "$dir")
+    remote_path=$(rpath "$dir")
+    dname=$(tr / - <<< "${local_path#/}")
+    drive="$USR_CACHE_DIR/$VMNAME/$dname.qcow2"
+    drive_uuid=$(drive_uuid "$USR_CACHE_DIR/$VMNAME/$dname.uuid")
+    drive_size=$(du -sm "$local_path" | cut -f 1)
+    redund_size=$(echo "$drive_size * 1.1" | bc | sed 's_\..*__g')
+    # sfdisk can't hahdle empty files
+    [ "$redund_size" -eq 0 ] && redund_size=1
+    run_mkdrive "$drive" ${redund_size}M $fs $drive_uuid "$local_path"
+    VOLUMES+=("$dname-$OWNER:$drive:qcow2:blk")
+    KOPT+=("ktest.mount=$drive_uuid:$fs:$remote_path")
+done
+
+for d in "${DISKS[@]}"; do
+    IFS=':' read -ra disk <<< "$d"
+    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
+    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
+    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+done
+
+notify "Discover hypervisor..."
+HOST=$(virsh hostname)
+printf "\b\b\b: $HOST"
+for volspec in "${VOLUMES[@]}"; do
+    IFS=':' read -ra volume <<< "$volspec"
+    vm::vol::upload "${volume[@]}"
+done
+[ -n "$FORCE" ] && vm::remove "$VMNAME"
+
+KERNEL_PATH=$(virsh vol-path "$KERNEL_VOLUME" --pool "$POOL" 2>/dev/null)
+INITRAMFS_PATH=$(virsh vol-path "$INITRAMFS_VOLUME" --pool "$POOL" 2>/dev/null)
+HV_ARCH=$(virsh nodeinfo | head -1 | sed 's/^CPU model: *//g')
+DOM_TYPE=$(virsh capabilities | xml sel -t -v "//arch[@name='$HV_ARCH']/domain/@type") || die "Can't determine domain type for $HV_ARCH"
+if [[ $DOM_TYPE = *kvm* ]]; then
+    DOM_TYPE=kvm
+elif [[ $DOM_TYPE = *hvf* ]]; then
+    DOM_TYPE=hvf
+else
+    DOM_TYPE=qemu
+fi
+
+notify "Prepare VM config"
+XML_NAME=$(make_xml "$VMNAME"                         \
+                    "$HV_ARCH"                        \
+                    "$DOM_TYPE"                       \
+                    "$POOL"                           \
+                    "$KERNEL_PATH"                    \
+                    "$INITRAMFS_PATH"                 \
+                    "$(join_by '|' "${VOLUMES[@]}")"  \
+                    "$(join_by '|' "${IFACES[@]}")"   \
+                    "${KOPT[@]}")
+xml::vcpu::set "$XML_NAME" "$VCPU"
+xml::memory::set "$XML_NAME" "$MEMORY"
+
+if [ -n "$GDB_ADDRESS" ]; then
+    xml::gdb::set "$XML_NAME" "$GDB_ADDRESS"
+fi
+
+ktest::lock
+trap ktest::unlock EXIT
+TAKEN_PORTS="$USR_CACHE_DIR/$VMNAME/port.list"
+PORT_LIST_VOL="ktest-$HOST.channel.ports"
+logq virsh vol-download "$PORT_LIST_VOL" "$TAKEN_PORTS" $POOL || {
+    log virsh vol-create-as "$POOL" "$PORT_LIST_VOL" 0
+    touch "$TAKEN_PORTS"
+}
+PORT_RANGE="$USR_CACHE_DIR/$VMNAME/port.range"
+seq $BASE_CHANNEL_PORT $((BASE_CHANNEL_PORT + N_CHANNEL_PORTS)) > "$PORT_RANGE"
+SPARE_PORTS=($(comm -23 "$PORT_RANGE" "$TAKEN_PORTS"))
+
+ATTEMPT=0
+MAX_ATTEMPTS=10
+while [ -z "$STARTED" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+    CHANNEL_PORT=${SPARE_PORTS[$ATTEMPT]}
+    xml::channelport::set "$XML_NAME" $CHANNEL_PORT
+    if [ -n "$FORCE" ]; then
+        vm::undefine "$VMNAME"
+        vm::define "$HOST" "$VMNAME" "$XML_NAME"
+    else
+        if ! vm::insync "$HOST" "$VMNAME" "$XML_NAME"; then
+            vm::undefine "$VMNAME"
+            vm::define "$HOST" "$VMNAME" "$XML_NAME"
+        fi
+    fi
+
+    if vm::start "$VMNAME"; then
+        STARTED=1
+    else
+        if grep -q 'Failed to start domain' "$USR_CACHE_DIR/$VMNAME/start.log"; then
+            FORCE=1
+        else
+            die "$(<$USR_CACHE_DIR/$VMNAME/start.log)"
+        fi
+    fi
+    : $((ATTEMPT++))
+done
+if [ -z "$STARTED" ] && [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
+    notify "Can't bind ktest channel to one of the ports: ${SPARE_PORTS[*]::$ATTEMPT}"
+    die
+fi
+echo "$CHANNEL_PORT" >> "$TAKEN_PORTS"
+sort -u < "$TAKEN_PORTS" > "$TAKEN_PORTS.sorted"
+log virsh vol-upload "$PORT_LIST_VOL" "$TAKEN_PORTS.sorted" $POOL
+ktest::unlock
+
+outfile=$(mktemp)
+( socat -U - TCP:$HOST:$CHANNEL_PORT > $outfile 2>/dev/null || {
+    CONNECTION_URI=$(virsh uri)
+    SSH_CSOCK=/tmp/ktest-$CHANNEL_PORT.sock
+    if [[ $CONNECTION_URI =~ ^qemu\+ssh://([[:alnum:]@:]+)/.*$ ]]; then
+        ssh -N -f -M -S $SSH_CSOCK -L $CHANNEL_PORT:localhost:$CHANNEL_PORT ${BASH_REMATCH[1]}
+        socat -U - TCP:localhost:$CHANNEL_PORT > $outfile
+        ssh -S $SSH_CSOCK -O exit localhost &>/dev/null || echo "Failed to close control socket"
+    fi
+  }
+) &
+logq virsh resume "$VMNAME" &
+if [ -t 1 ]; then
+  virsh console "$VMNAME"
+  vm::destroy "$VMNAME"
+else
+  notify "Wait for VM shutdown"
+  state="running"
+  start_time=$SECONDS
+  while [ "$state" == "running" ]; do
+      if [ -z "$nmi_time" ] && (( SECONDS - start_time > VM_TIMEOUT )); then
+          notify "NMI $VMNAME due to timeout"
+          log virsh inject-nmi "$VMNAME"
+          nmi_time=$SECONDS
+      fi
+      if [ -n "$nmi_time" ] && (( SECONDS - nmi_time > KDUMP_TIMEOUT )); then
+          notify "Kill $VMNAME due to timeout"
+          log virsh destroy "$VMNAME"
+      fi
+      sleep 1
+      state=$(virsh domstate "$VMNAME")
+  done
+fi
+ktest::lock
+log virsh vol-download $PORT_LIST_VOL "$TAKEN_PORTS" $POOL
+sed -i -- "/$CHANNEL_PORT/d" $TAKEN_PORTS
+if [ -s "$TAKEN_PORTS" ]; then
+    log virsh vol-upload $PORT_LIST_VOL "$TAKEN_PORTS" $POOL
+else
+    log virsh vol-delete $PORT_LIST_VOL $POOL
+fi
+ktest::unlock
+wait
+results=$(mktemp -d)
+if [ -s $outfile ] && tar -tf $outfile &>/dev/null; then
+    tar -xzf $outfile -C "$OUTPUT"
+    notify "Results can be found in $OUTPUT"
+    echo
+    if [ -r "$OUTPUT/exit-code" ]; then
+        exit $(<"$OUTPUT/exit-code")
+    else
+        exit 1
+    fi
+else
+    notify "Recieved nothing from VM"
+    die
+fi
