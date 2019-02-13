@@ -38,4 +38,9 @@ cache::file::outdated() {
     local FILE_SHA=$(cache::sum "$1")
     [ "$CACHE_SHA" != "$FILE_SHA" ]
 }
+
+cache::file::clean() {
+    notify "Delete cache\n"
+    rm -r "$USR_CACHE_DIR"
+}
 # vim: ft=sh
