@@ -1,0 +1,11 @@
+ARG SUSE_IMAGE=opensuse:42.3
+FROM $SUSE_IMAGE
+RUN zypper -n install kernel-default \
+                      kexec-tools    \
+                      makedumpfile   \
+                      which          \
+                      openssh        \
+                      tar            \
+                      kmod-compat    \
+                      xfsprogs       \
+                      binutils

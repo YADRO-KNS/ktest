@@ -1,0 +1,16 @@
+#!/bin/bash
+SUSE_IMAGE=opensuse:42.3
+TARGET_IMAGE=ktest-$(tr : - <<< $SUSE_IMAGE)
+docker build --build-arg SUSE_IMAGE=$SUSE_IMAGE \
+             -t $TARGET_IMAGE                   \
+             -f tests/Dockerfile.opensuse tests
+# Extract kernel from the container
+docker run -v $(pwd)/tests:/tests       \
+           -w /tests                    \
+           $TARGET_IMAGE                \
+           /tests/steal-kernel.opensuse \
+           /tests/kernel
+./run --docker-image $TARGET_IMAGE \
+      -I tests/guest:/test         \
+      -e /test/selfcheck           \
+      tests/kernel

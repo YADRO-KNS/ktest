@@ -1,0 +1,6 @@
+#!/bin/bash
+set -e
+KERNEL_PATH=$(find /boot -name 'vmlinu[x|z]')
+[ -n "$KERNEL_PATH" ] || echo "Can't find kernel" 1>&2
+cp "$KERNEL_PATH" "$1"
+touch "$1"
