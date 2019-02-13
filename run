@@ -336,6 +336,11 @@ ktest::unlock(){
     logq virsh vol-delete ktest-$HOST.lock $POOL || true
 }
 
+ktest::exit(){
+    ktest::unlock
+    clean
+}
+
 devsuffix() {
     local i="$1"
     local id
@@ -587,7 +592,9 @@ xml::gdb::set() {
 
 clean() {
     if [ -n "$CLEAN" ]; then
+        notify "Clean temporary ktest files and volumes on hypervisor"
         vm::vol::clean
+        cache::file::clean
     fi
 }
 
@@ -669,7 +676,7 @@ if [ -n "$GDB_ADDRESS" ]; then
 fi
 
 ktest::lock
-trap ktest::unlock EXIT
+trap ktest::exit EXIT
 TAKEN_PORTS="$USR_CACHE_DIR/$VMNAME/port.list"
 PORT_LIST_VOL="ktest-$HOST.channel.ports"
 logq virsh vol-download "$PORT_LIST_VOL" "$TAKEN_PORTS" $POOL || {
