@@ -26,6 +26,7 @@ declare -a POSITIONAL
 : ${OWNER:=$(whoami)}
 : ${POOL:=default}
 : ${FORCE:=}
+: ${CLEAN:=}
 DIRS=("${DIRS[@]}")
 DISKS=("${DISKS[@]}")
 INSTALL=("${INSTALL[@]}")
@@ -158,6 +159,9 @@ parse_options(){
             shift 2
         elif [ "$1" == "-f" -o "$1" == "--force" ]; then
             FORCE=1
+            shift
+        elif [ "$1" == "-c" -o "$1" == "--clean" ]; then
+            CLEAN=1
             shift
         elif [ "$1" == "-i" -o "$1" == "--install" ]; then
             INSTALL+=("$2")
@@ -444,6 +448,14 @@ vm::vol::upload(){
     fi
 }
 
+vm::vol::clean(){
+    for vol in "${VOLUMES[@]}"; do
+        IFS=':' read -ra volume <<< "$vol"
+        notify "Delete volume $volume on $POOL"
+        log virsh vol-delete $volume $POOL
+    done
+}
+
 vm::cached_xml() {
     echo "$USR_CACHE_DIR/$1-$2.xml"
 }
@@ -571,6 +583,12 @@ xml::gdb::set() {
   xml ed --inplace -N qemu="$qemuns"                                          \
                    -a '//qemu:arg[last()]' -t attr -n value -v "tcp:$addr"    \
                    "$xml"
+}
+
+clean() {
+    if [ -n "$CLEAN" ]; then
+        vm::vol::clean
+    fi
 }
 
 parse_options $*
