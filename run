@@ -522,6 +522,11 @@ run_mkdrive() {
             local targetvol=(-v "$targetdir:$targetdir")
         fi
         docker run --rm                               \
+                   -v /lib/modules:/lib/modules       \
+                   --privileged                       \
+                   "$DOCKER_IMAGE"                    \
+                   modprobe loop
+        docker run --rm                               \
                    ${targetvol[@]}                    \
                    -v "$CURDIR":/ktest                \
                    -v "$USR_CACHE_DIR:$USR_CACHE_DIR" \
