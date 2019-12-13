@@ -731,7 +731,7 @@ outfile=$(mktemp)
 ( socat -U - TCP:$HOST:$CHANNEL_PORT > $outfile 2>/dev/null || {
     CONNECTION_URI=$(virsh uri)
     SSH_CSOCK=/tmp/ktest-$CHANNEL_PORT.sock
-    if [[ $CONNECTION_URI =~ ^qemu\+ssh://([[:alnum:]@:]+)/.*$ ]]; then
+    if [[ $CONNECTION_URI =~ ^qemu\+ssh://([[:alnum:]@:\.\-]+)/.*$ ]]; then
         ssh -N -f -M -S $SSH_CSOCK -L $CHANNEL_PORT:localhost:$CHANNEL_PORT ${BASH_REMATCH[1]}
         socat -U - TCP:localhost:$CHANNEL_PORT > $outfile
         ssh -S $SSH_CSOCK -O exit localhost &>/dev/null || echo "Failed to close control socket"
