@@ -15,7 +15,7 @@
 #
 set -e
 export LANG=C
-DEPS=(socat xml virsh)
+DEPS=(socat xml virsh bc)
 
 : ${CONFIG:=.ktest}
 if [ -z "$NO_CONFIG" ] && [ -f $CONFIG ]; then
