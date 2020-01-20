@@ -627,7 +627,7 @@ for dir in "${DIRS[@]}"; do
     drive="$USR_CACHE_DIR/$VMNAME/$dname.qcow2"
     drive_uuid=$(drive_uuid "$USR_CACHE_DIR/$VMNAME/$dname.uuid")
     drive_size=$(du -sm "$local_path" | cut -f 1)
-    redund_size=$(echo "$drive_size * 1.1" | bc | sed 's_\..*__g')
+    redund_size=$(echo "$drive_size * 1.1" | bc | awk '{printf("%.0f\n", $1+0.5)}')
     # sfdisk can't hahdle empty files
     [ "$redund_size" -eq 0 ] && redund_size=1
     run_mkdrive "$drive" ${redund_size}M $fs $drive_uuid "$local_path"
