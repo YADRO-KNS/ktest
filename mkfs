@@ -26,13 +26,13 @@ if ! losetup -f &>/dev/null; then
     exit 1
 fi
 ldev_path=$(losetup -f -P --show "$2")
+trap clean EXIT
 echo Working with $ldev_path
 ldev=${ldev_path#/dev/}
 part=${ldev}p1
 part_dev_path=/sys/class/block/${part}/dev
 if [ ! -r $part_dev_path ]; then
     echo "Can't find partition: $part" >&2
-    clean
     exit 1
 fi
 
@@ -43,7 +43,6 @@ if [ ! -e "/dev/$part" ]; then
 fi
 
 if ! mkfs.$FS "/dev/$part"; then
-    clean
     exit 1
 fi
 
@@ -56,13 +55,11 @@ case $FS in
         ;;
     *)
         echo "Don't how to set UUID for $FS" >&2
-        clean
         exit 1
 esac
 
 if [ -n "$4" ]; then
     if [ ! -d "$4" ]; then
-        clean
         echo "$4 is not a directory" >&2
         exit 1
     fi
@@ -72,4 +69,3 @@ if [ -n "$4" ]; then
     cp -a "$4/." "$mp"
     umount "$mp"
 fi
-clean
