@@ -292,7 +292,7 @@ parse_options(){
     CRASH_VOLUME="crashes-$OWNER"
 
     for dep in "${DEPS[@]}"; do
-        which $dep &>/dev/null || die "$dep is not installed"
+        command -v $dep &>/dev/null || die "$dep is not installed"
     done
 }
 

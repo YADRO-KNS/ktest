@@ -106,7 +106,7 @@ entrypoint="$GUEST/profile"
 check_progs() {
     local notfound=0
     for prog in "$@"; do
-        if ! which "$prog" 2>/dev/null 1>&2; then
+        if ! command -v "$prog" 2>/dev/null 1>&2; then
             echo "ERROR: Can't find \"$prog\" in \$PATH"
             ((notfound++))
         fi
