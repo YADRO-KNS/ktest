@@ -5,3 +5,6 @@
 [._]ss[a-gi-z]
 [._]sw[a-p]
 tests/kernel
+
+.idea
+*/.idea
