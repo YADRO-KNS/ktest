@@ -46,6 +46,7 @@ N_CHANNEL_PORTS=999
 : ${VM_TIMEOUT:=600}
 : ${VCPU:=1}
 : ${KDUMP_TIMEOUT:=180}
+: ${CRASHDRIVE_SIZE:=5G}
 declare -a DISKNAMES
 declare -a KOPT
 declare -a MKINITRD_ARGS
@@ -127,6 +128,16 @@ options:
     --kdump-timeout TIMEOUT        Specifies time limit for kernel dump.
                                    A VM is shut down if it doesn't manage to
                                    save kdump within the time limit.
+    --crashdrive-size SIZE         Is the crash drive SIZE in bytes.
+                                   Optional suffixes:
+                                   'k' or 'K' (kilobyte, 1024),
+                                   'M' (megabyte, 1024k),
+                                   'G' (gigabyte, 1024M),
+                                   'T' (terabyte, 1024G),
+                                   'P' (petabyte, 1024T),
+                                   'E' (exabyte, 1024P)
+                                   'b' is ignored
+                                   5G by default.
 EOF
 }
 
@@ -234,6 +245,9 @@ parse_options(){
             shift 2
         elif [ "$1" == "--kdump-timeout" ]; then
             KDUMP_TIMEOUT="$2"
+            shift 2
+        elif [ "$1" == "--crashdrive-size" ]; then
+            CRASHDRIVE_SIZE="$2"
             shift 2
         else
             POSITIONAL+=("$1")
@@ -615,7 +629,7 @@ VOLUMES+=("$INITRAMFS_VOLUME:$INITRAMFS:raw:")
 
 CRASHDRIVE="$USR_CACHE_DIR/$VMNAME/crash.qcow2"
 CRASHDRIVE_UUID=$(drive_uuid "$USR_CACHE_DIR/$VMNAME/crash.uuid")
-run_mkdrive "$CRASHDRIVE" 5G xfs $CRASHDRIVE_UUID
+run_mkdrive "$CRASHDRIVE" "$CRASHDRIVE_SIZE" xfs $CRASHDRIVE_UUID
 VOLUMES+=("$CRASH_VOLUME:$CRASHDRIVE:qcow2:blk")
 KOPT+=("ktest.crashdrive=$CRASHDRIVE_UUID:xfs:/crashes")
 
