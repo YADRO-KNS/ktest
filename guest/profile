@@ -3,11 +3,11 @@ if grep -q "crashkernel=\S\+" < /proc/cmdline; then
     echo "ktest: Setting up kdump" > /dev/kmsg
     case `uname -m` in
         x86_64)
-            CMDLINE="console=ttyS0 maxcpus=1 reset_devices"
+            CMDLINE="console=ttyS0 maxcpus=$(nproc) reset_devices"
             KEXEC_OPTS="--console-serial"
             ;;
         ppc64le)
-            CMDLINE="console=hvc0 maxcpus=1 noirqdistrib reset_devices"
+            CMDLINE="console=hvc0 maxcpus=$(nproc) noirqdistrib reset_devices"
             ;;
         *)
             ;;
