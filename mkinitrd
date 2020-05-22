@@ -155,7 +155,7 @@ if [ -n "$KDUMP" ]; then
     mkdir -p "$bootdir"
     kernel=$(find /boot -name 'vmlinu[x|z]')
     cp "$kernel" "$bootdir"
-    KDUMP_INSTALL=(gzip vmcore-dmesg makedumpfile scp grep cut tar)
+    KDUMP_INSTALL=(gzip nproc makedumpfile scp grep cut tar)
 
     check_progs "${KDUMP_INSTALL[@]}"
     dracut -N --force                                                         \

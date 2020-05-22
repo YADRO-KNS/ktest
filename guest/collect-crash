@@ -25,13 +25,13 @@ if [ "$crashdrive" != "" ]; then
     echo "ktest: mount crashdrive $uuid at $mount_point" > /dev/kmsg
     mount -t $fs -U $uuid $mount_point
 
-    core_dst="$mount_point/crash.dump"
-    echo "ktest: save crash to $core_dst" > /dev/kmsg
-    makedumpfile -c -d 31 /proc/vmcore "$core_dst"
-
     dmesg_dst="$mount_point/dmesg.gz"
     echo "ktest: save dmesg to $dmesg_dst" > /dev/kmsg
-    vmcore-dmesg /proc/vmcore | gzip -c > "$dmesg_dst"
+    makedumpfile -c --dump-dmesg --num-threads $(nproc) /proc/vmcore "$dmesg_dst"
+
+    core_dst="$mount_point/crash.dump"
+    echo "ktest: save crash to $core_dst" > /dev/kmsg
+    makedumpfile -c -d 31 --num-threads $(nproc) /proc/vmcore "$core_dst"
 
     VP_CLASS=/sys/class/virtio-ports
     CHANNEL_NAME="org.ktest.channel.0"
