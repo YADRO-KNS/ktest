@@ -409,6 +409,15 @@ make_xml(){
             -a '//devices/disk[last()]/target' -t attr -n dev -v $dev         \
             "$xml"
 
+        if [ "$bus" == "scsi" ]; then
+            xml ed --inplace                                                      \
+                -s '//devices/disk[last()]' -t elem -n address -v ''              \
+                -a '//devices/disk[last()]/address' -t attr -n controller -v '0'  \
+                -a '//devices/disk[last()]/address' -t attr -n type -v 'drive'    \
+                -a '//devices/disk[last()]/address' -t attr -n unit -v $sidx      \
+                "$xml"
+        fi
+
         if [ -n "${v[4]}" ]; then
             xml ed --inplace                                                  \
                 -s '//devices/disk[last()]' -t elem -n serial -v "${v[4]}"    \
