@@ -1,5 +1,5 @@
 #!/bin/bash
-SUSE_IMAGE=opensuse:42.3
+SUSE_IMAGE=opensuse/leap:15.1
 TARGET_IMAGE=ktest-$(tr : - <<< $SUSE_IMAGE)
 docker build --build-arg SUSE_IMAGE=$SUSE_IMAGE \
              -t $TARGET_IMAGE                   \
