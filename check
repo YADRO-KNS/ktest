@@ -13,4 +13,5 @@ docker run -v $(pwd)/tests:/tests       \
 ./run --docker-image $TARGET_IMAGE \
       -I tests/guest:/test         \
       -e /test/selfcheck           \
+      "$@"                         \
       tests/kernel
