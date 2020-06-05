@@ -23,7 +23,7 @@ CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
 GUEST="$CURDIR/guest"
 KMODS+=(virtio_pci virtio_net virtio_blk virtio_scsi virtio_console virtio-rng sg sd_mod)
 MODULES=(base systemd terminfo)
-INSTALL=(zcat zless zgrep grep gzip cut sed awk tr ps tar)
+INSTALL=(zcat zless zgrep grep gzip cut sed awk tr ps tar nproc)
 source "$CURDIR/lib"
 systemddir=/usr/lib/systemd
 sysunitdir="$systemddir/system"
