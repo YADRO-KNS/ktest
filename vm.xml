@@ -24,6 +24,7 @@
         <target type='serial' port='0'/>
       </console>
       <controller type='scsi' index='0' model='virtio-scsi'/>
+      <controller type='pci' index='1' model='pci-root'/>
       <rng model='virtio'>
         <backend model='random'>/dev/random</backend>
       </rng>
