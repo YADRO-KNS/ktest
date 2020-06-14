@@ -991,7 +991,7 @@ outfile=$(mktemp)
 ) &
 logq virsh resume "$VMNAME" &
 
-if [ -t 1 ]; then
+if [ -t 1 ] && [ -t 0 ]; then
   virsh console "$VMNAME"
   vm::destroy "$VMNAME"
 else
