@@ -15,7 +15,7 @@
 #
 set -e
 export LANG=C
-DEPS=(socat xml virsh bc)
+DEPS=(socat xml virsh bc uuidgen)
 
 : ${CONFIG:=.ktest}
 if [ -z "$NO_CONFIG" ] && [ -f $CONFIG ]; then
@@ -24,6 +24,7 @@ fi
 
 declare -a POSITIONAL
 : ${OWNER:=$(whoami)}
+: ${NODE:=}
 : ${POOL:=default}
 : ${FORCE:=}
 : ${CLEAN:=}
@@ -32,6 +33,7 @@ DISKS=("${DISKS[@]}")
 INSTALL=("${INSTALL[@]}")
 INCLUDES=("${INCLUDES[@]}")
 MODULES=("${MODULES[@]}")
+PHYSICAL_FUNCTIONS=("${PHYSICAL_FUNCTIONS[@]}")
 BASE_CHANNEL_PORT=10000
 N_CHANNEL_PORTS=999
 : ${MEMORY:=512}
@@ -39,6 +41,8 @@ N_CHANNEL_PORTS=999
 : ${CLEAN:=}
 : ${GDB_ADDRESS:=}
 : ${XML_TEMPLATE:=vm.xml}
+: ${XML_PCI_TEMPLATE:=pci.xml}
+: ${XML_NET_TEMPLATE:=net.xml}
 : ${DISABLE_CONSOLE:=}
 : ${DISABLE_KDUMP:=}
 : ${DOCKER_IMAGE:=}
@@ -47,12 +51,20 @@ N_CHANNEL_PORTS=999
 : ${VCPU:=1}
 : ${KDUMP_TIMEOUT:=180}
 : ${CRASHDRIVE_SIZE:=5G}
+: ${RDMA:=no}
+: ${RDMA_DEVICE:=}
+: ${PCI_CLIEN_COUNT:=0}
+: ${PCI_DEVICES_IN_NET:=1}
+: ${RDMA_NETWORK:=}
 declare -a DISKNAMES
 declare -a KOPT
 declare -a MKINITRD_ARGS
 declare -a VOLUMES
 declare -a IFACES
 declare -a DHCP_IFACES
+declare -a RDMA_DEVICES
+declare -a NETWORKS_LIST
+declare -a CLUSTER_ID
 CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
 
 source "$CURDIR/cache"
@@ -124,6 +136,12 @@ options:
     --uri URI                      set URI to hypervisor
     --pool POOL                    pool to store the kernel and initramfs
     --owner OWNER                  owner of the VM
+    --node NUM                     Node number in cluster
+    --cluster-id ID                Cluster ID on hypervisor
+    --physical_functions LIST      physical functions LIST
+    --pci-count COUNT              COUNT of virtual pci devices on VM, 0 by default
+    --pci_devs_in_net COUNT        COUNT of virtual pci devices in rdma-network, 1 by default
+    --rdma-network                 Enable rdma connection
     -t, --timeout TIMEOUT          VM timeout
     --kdump-timeout TIMEOUT        Specifies time limit for kernel dump.
                                    A VM is shut down if it doesn't manage to
@@ -228,7 +246,7 @@ parse_options(){
         elif [ "$1" == "--disable-kdump" ]; then
             DISABLE_KDUMP=y
             shift
-        elif [ "$1" == "--no-console" ]; then
+        elif [ "$1" == "--disable-console" ]; then
             DISABLE_CONSOLE=y
             shift
         elif [ "$1" == "--pool" ]; then
@@ -240,11 +258,29 @@ parse_options(){
         elif [ "$1" == "--owner" ]; then
             OWNER="$2"
             shift 2
+        elif [ "$1" == "--node" ]; then
+            NODE="$2"
+            shift 2
+        elif [ "$1" == "--cluster-id" ]; then
+            CLUSTER_ID+=("$2")
+            shift 2
+        elif [ "$1" == "--pci_devs_in_net" ]; then
+            PCI_DEVICES_IN_NET="$2"
+            shift 2
+        elif [ "$1" == "--rdma-network" ]; then
+            RDMA_NETWORK=1
+            shift
         elif [ "$1" == "-t" -o "$1" == "--timeout" ]; then
             VM_TIMEOUT="$2"
             shift 2
         elif [ "$1" == "--kdump-timeout" ]; then
             KDUMP_TIMEOUT="$2"
+            shift 2
+        elif [ "$1" == "--physical_functions" ]; then
+            PHYSICAL_FUNCTIONS+=("$2")
+            shift 2
+        elif [ "$1" == "--pci-count" ] ; then
+            PCI_CLIEN_COUNT="$2"
             shift 2
         elif [ "$1" == "--crashdrive-size" ]; then
             CRASHDRIVE_SIZE="$2"
@@ -261,9 +297,17 @@ parse_options(){
 
     KERNEL="${POSITIONAL[0]}"
     [ -r "$KERNEL" ] || die "Can't read kernel: $KERNEL"
+    if [ -n "$NODE" ] && [ -z $CLUSTER_ID ]; then
+        die "Cluster ID is missing"
+    fi
+    [ -n "$NODE" ] && OWNER+="$NODE"
+    [ -n "$NODE" ] && VMNAME+="$NODE"
+    [ -n "$NODE" ] && OUTPUT+="$NODE"
     [ -n "$ENTRY_POINT" ] && KOPT+=("ktest.start=$ENTRY_POINT")
     [ -z "$DISABLE_CONSOLE" ] && CONSOLE="--console"
     [[ $VM_TIMEOUT =~ ^[0-9]+$ ]] || die "Invalid timeout: $VM_TIMEOUT"
+    [[ $PCI_CLIEN_COUNT =~ ^[0-9]+$ ]] || die "Invalid number of virtual pci devices on VM: $PCI_CLIEN_COUNT"
+    [[ $PCI_DEVICES_IN_NET =~ ^[0-9]+$ ]] || die "Invalid PCI_DEVICES_IN_NET: $PCI_DEVICES_IN_NET"
     if [ -z "$DISABLE_KDUMP" ]; then
         MKINITRD_ARGS+=("--with-kdump")
         KOPT+=("crashkernel=0M-2G:128M,2G-6G:256M,6G-8G:512M,8G-:768M")
@@ -352,6 +396,12 @@ ktest::unlock(){
 
 ktest::exit(){
     ktest::unlock
+    for dev in "${RDMA_DEVICES[@]}"; do
+        pci::unlock "$dev"
+    done
+    for net in "${NETWORKS_LIST[@]}"; do
+        rdma::net::unlock "$net"
+    done
     clean
 }
 
@@ -363,6 +413,70 @@ devsuffix() {
         i=$((i / 26))
     done
     echo $id
+}
+
+make_xml_pci(){
+    local xml_pci=$(mktemp)
+    local domain=$(echo $1 | awk -F"_" '{print "0x"$2}')
+    local bus=$(echo $1 | awk -F"_" '{print "0x"$3}')
+    local slot=$(echo $1 | awk -F"_" '{print "0x"$4}')
+    local function=$(echo $1 | awk -F"_" '{print "0x"$5}')
+    [ -z "$1" ] && die "ERROR: Needs pci virtual function to add it to VM"
+    cp "$CURDIR/$XML_PCI_TEMPLATE" "$xml_pci"
+    xml ed --inplace --update "/interface/source/address/@domain" -v "$domain" "$xml_pci"
+    xml ed --inplace --update "/interface/source/address/@bus" -v "$bus" "$xml_pci"
+    xml ed --inplace --update "/interface/source/address/@slot" -v "$slot" "$xml_pci"
+    xml ed --inplace --update "/interface/source/address/@function" -v "$function" "$xml_pci"
+    echo "$xml_pci"
+}
+
+make_xml_net(){
+    local xml_net=$(mktemp)
+    [ -z "$1" ] && die "ERROR: Empty network id"
+    local net_id="$1"
+    shift
+    [ -z "$1" ] && die "ERROR: Needs pci virtual function to create virtual network"
+    local domain=$(echo $1 | awk -F"_" '{print "0x"$2}')
+    local bus=$(echo $1 | awk -F"_" '{print "0x"$3}')
+    local slot=$(echo $1 | awk -F"_" '{print "0x"$4}')
+    local function=$(echo $1 | awk -F"_" '{print "0x"$5}')
+
+    cp "$CURDIR/$XML_NET_TEMPLATE" "$xml_net"
+
+    xml ed --inplace --update "/network/name" -v "$net_id" "$xml_net"
+    xml ed --inplace --update "/network/uuid" -v "$net_id" "$xml_net"
+    xml ed --inplace --subnode "/network/forward" --type elem -n "address"     \
+        --insert "//address[last()]" --type attr -n "type" --value "pci"       \
+        --insert "//address[last()]" --type attr -n "domain" --value "$domain" \
+        --insert "//address[last()]" --type attr -n "bus" --value "$bus"       \
+        --insert "//address[last()]" --type attr -n "slot" --value "$slot"     \
+        --insert "//address[last()]" --type attr -n "function" --value "$function" "$xml_net"
+
+    echo "$xml_net"
+}
+
+modify_xml_net(){
+    local xml_net=$(mktemp)
+    [ -z "$1" ] && die "ERROR: Empty network id"
+    local net_id="$1"
+    shift
+    [ -z "$1" ] && die "ERROR: Needs pci virtual function to modify virtual network"
+    local domain=$(echo $1 | awk -F"_" '{print "0x"$2}')
+    local bus=$(echo $1 | awk -F"_" '{print "0x"$3}')
+    local slot=$(echo $1 | awk -F"_" '{print "0x"$4}')
+    local function=$(echo $1 | awk -F"_" '{print "0x"$5}')
+
+    virsh net-dumpxml "$net_id" > "$xml_net"
+    virsh net-destroy "$net_id" > /dev/null 2>&1
+
+    xml ed --inplace --subnode "/network/forward" --type elem -n "address"     \
+        --insert "//address[last()]" --type attr -n "type" --value "pci"       \
+        --insert "//address[last()]" --type attr -n "domain" --value "$domain" \
+        --insert "//address[last()]" --type attr -n "bus" --value "$bus"       \
+        --insert "//address[last()]" --type attr -n "slot" --value "$slot"     \
+        --insert "//address[last()]" --type attr -n "function" --value "$function" "$xml_net"
+
+    echo "$xml_net"
 }
 
 make_xml(){
@@ -613,8 +727,108 @@ clean() {
     if [ -n "$CLEAN" ]; then
         notify "Clean temporary ktest files and volumes on hypervisor"
         vm::vol::clean
-        cache::file::clean
+        if [ -z "$NODE" ]; then
+            notify "Clean cache"
+            cache::file::clean
+        fi
     fi
+}
+
+pci::lock(){
+    logq virsh vol-create-as $POOL pci_dev-$1.lock 0 > /dev/null 2>&1
+    return $?
+}
+
+pci::unlock(){
+    logq virsh vol-delete pci_dev-$1.lock $POOL > /dev/null 2>&1 || true
+}
+
+rdma::net::lock(){
+    logq virsh vol-create-as $POOL rdma_net-$1.lock 0 > /dev/null 2>&1
+    return $?
+}
+
+rdma::net::unlock(){
+    logq virsh net-destroy $1 > /dev/null 2>&1 || true
+    logq virsh vol-delete rdma_net-$1.lock $POOL > /dev/null 2>&1 || true
+}
+
+pci::get() {
+    local -a hypervisor_pci
+    local -a vms_pci
+    local device
+    local capability_type
+    local -a interface_type
+
+    for dev in "${PHYSICAL_FUNCTIONS[@]}"; do
+        devxml=$(virsh nodedev-dumpxml "$dev")
+        capability_type=$(xml sel -T -t -v  "/device/capability/capability/@type" <<< "$devxml")
+        if [ "$capability_type" == "virt_functions" ]; then
+            hypervisor_pci+=( $(xml sel -T -t -m "/device/capability/capability/address" \
+                -o "pci_" -v "@domain" \
+                -o "_" -v "@bus" \
+                -o "_" -v "@slot" \
+                -o "_" -v "@function" -n \
+                            <<< "$devxml" \
+                | sed -e 's/0x//g') );
+        else
+            die "ERROR: No virtual functions on hypervisor"
+        fi
+    done
+
+    for vms in $(virsh list --name); do
+        vmsxml=$(virsh dumpxml "$vms")
+        interface_type=( $(xml sel -T -t -v  "/domain/devices/interface/@type" <<< "$vmsxml") )
+        for t in ${interface_type[@]}; do
+            if [ "$t" == "hostdev" ]; then
+                vms_pci+=( $(  xml sel -T -t -m "/domain/devices/interface/source/address" \
+                    -o "pci_" -v "@domain" \
+                                -o "_" -v "@bus" \
+                                -o "_" -v "@slot" \
+                                -o "_" -v "@function" -n \
+                                <<< "$vmsxml" \
+                                | sed -e 's/0x//g') );
+            fi
+       done
+    done
+
+    for (( i=0; i < ${#hypervisor_pci[*]}; i++ )) do
+        if pci::lock "${hypervisor_pci[i]}"; then
+            if [[ "${vms_pci[@]}" =~ "${hypervisor_pci[i]}" ]]; then
+                pci::unlock "${hypervisor_pci[i]}"
+            else
+                device="${hypervisor_pci[i]}"
+                echo "$device"
+                break
+            fi
+        else
+            if [ $(($i+1)) -eq "${#hypervisor_pci[*]}" ]; then
+                i=0
+            fi
+        fi
+    done
+}
+
+rdma::network() {
+    local network_id="$1"
+    local device="$2"
+    local xml_file
+
+    if rdma::net::lock "$network_id"; then
+        echo "Create network from xml"
+        xml_file=$(make_xml_net "$network_id" "$device")
+        logq virsh net-create "$xml_file"
+    else
+        while true; do
+            if [[ "$(virsh net-list --uuid)" =~ "$network_id" ]]; then
+                echo "Modify network xml"
+                xml_file=$(modify_xml_net "$network_id" "$device")
+                logq virsh net-create "$xml_file"
+                break
+            fi
+        done
+    fi
+    NETWORKS_LIST+=("$network_id")
 }
 
 parse_options $*
@@ -687,6 +901,7 @@ XML_NAME=$(make_xml "$VMNAME"                         \
                     "$(join_by '|' "${VOLUMES[@]}")"  \
                     "$(join_by '|' "${IFACES[@]}")"   \
                     "${KOPT[@]}")
+
 xml::vcpu::set "$XML_NAME" "$VCPU"
 xml::memory::set "$XML_NAME" "$MEMORY"
 
@@ -697,7 +912,7 @@ fi
 ktest::lock
 trap ktest::exit EXIT
 TAKEN_PORTS="$USR_CACHE_DIR/$VMNAME/port.list"
-PORT_LIST_VOL="ktest-$HOST.channel.ports"
+PORT_LIST_VOL="ktest-$HOST-$NODE.channel.ports"
 logq virsh vol-download "$PORT_LIST_VOL" "$TAKEN_PORTS" $POOL || {
     log virsh vol-create-as "$POOL" "$PORT_LIST_VOL" 0
     touch "$TAKEN_PORTS"
@@ -708,6 +923,7 @@ SPARE_PORTS=($(comm -23 "$PORT_RANGE" "$TAKEN_PORTS"))
 
 ATTEMPT=0
 MAX_ATTEMPTS=10
+
 while [ -z "$STARTED" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
     CHANNEL_PORT=${SPARE_PORTS[$ATTEMPT]}
     xml::channelport::set "$XML_NAME" $CHANNEL_PORT
@@ -721,6 +937,26 @@ while [ -z "$STARTED" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
         fi
     fi
 
+    for (( i=0; i < "$PCI_CLIEN_COUNT"; i++ )) do
+            RDMA_DEVICE=$(pci::get)
+            RDMA_DEVICES+=("$RDMA_DEVICE")
+            XML_PCI_NAME=$(make_xml_pci "$RDMA_DEVICE")
+            logq virsh attach-device "$VMNAME" --file "$XML_PCI_NAME" --persistent
+    done
+
+    if [ -n "$RDMA_NETWORK" ]; then
+        if [[ "$PCI_DEVICES_IN_NET" -gt "${#RDMA_DEVICES[*]}" ]]; then
+            die "Not found $PCI_DEVICES_IN_NET PCI devices"
+        fi
+        dev_count=0
+        for (( i=0; i < "${#CLUSTER_ID[*]}"; i++ )) do
+            for (( j=0; j < "$PCI_DEVICES_IN_NET"; j++ )) do
+                rdma::network "${CLUSTER_ID[i]}" "${RDMA_DEVICES[dev_count]}"
+                dev_count=$(($dev_count+1))
+            done
+        done
+    fi
+
     if vm::start "$VMNAME"; then
         STARTED=1
     else
@@ -732,6 +968,7 @@ while [ -z "$STARTED" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
     fi
     : $((ATTEMPT++))
 done
+
 if [ -z "$STARTED" ] && [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
     notify "Can't bind ktest channel to one of the ports: ${SPARE_PORTS[*]::$ATTEMPT}"
     die
@@ -753,6 +990,7 @@ outfile=$(mktemp)
   }
 ) &
 logq virsh resume "$VMNAME" &
+
 if [ -t 1 ]; then
   virsh console "$VMNAME"
   vm::destroy "$VMNAME"
@@ -782,8 +1020,17 @@ if [ -s "$TAKEN_PORTS" ]; then
 else
     log virsh vol-delete $PORT_LIST_VOL $POOL
 fi
+
 ktest::unlock
 wait
+for dev in "${RDMA_DEVICES[@]}"; do
+    pci::unlock "$dev"
+done
+
+for net in "${NETWORKS_LIST[@]}"; do
+    rdma::net::unlock "$net"
+done
+
 results=$(mktemp -d)
 if [ -s $outfile ] && tar -tf $outfile &>/dev/null; then
     tar -xzf $outfile -C "$OUTPUT"

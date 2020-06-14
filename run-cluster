@@ -1,0 +1,15 @@
+#!/bin/bash
+
+CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
+source "$CURDIR/cache"
+
+cluster_id1=$(uuidgen)
+cluster_id2=$(uuidgen)
+
+"$CURDIR/run" $* --node 0 --cluster-id "$cluster_id1" --cluster-id "$cluster_id2" --disable-console &
+vm1_pid=$!
+
+"$CURDIR/run" $* --node 1 --cluster-id "$cluster_id1" --cluster-id "$cluster_id2" --disable-console &
+vm2_pid=$!
+
+wait $vm1_pid $vm2_pid
