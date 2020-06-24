@@ -9,4 +9,4 @@ ConditionKernelCommandLine=ktest.dhcp
 Type=forking
 EnvironmentFile=/etc/dhclient
 PIDFile=/var/run/dhclient.pid
-ExecStart=/sbin/dhclient $INTERFACES
+ExecStart=/sbin/dhclient -H $HOSTNAME $INTERFACES

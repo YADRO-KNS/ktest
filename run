@@ -300,9 +300,9 @@ parse_options(){
     if [ -n "$NODE" ] && [ -z $CLUSTER_ID ]; then
         die "Cluster ID is missing"
     fi
-    [ -n "$NODE" ] && OWNER+="$NODE"
-    [ -n "$NODE" ] && VMNAME+="$NODE"
-    [ -n "$NODE" ] && OUTPUT+="$NODE"
+    [ -n "$NODE" ] && OWNER="$NODE-$OWNER"
+    VMNAME="ktest-$OWNER"
+    [ -n "$NODE" ] && OUTPUT+="-$VMNAME"
     [ -n "$ENTRY_POINT" ] && KOPT+=("ktest.start=$ENTRY_POINT")
     [ -z "$DISABLE_CONSOLE" ] && CONSOLE="--console"
     [[ $VM_TIMEOUT =~ ^[0-9]+$ ]] || die "Invalid timeout: $VM_TIMEOUT"
@@ -344,7 +344,7 @@ parse_options(){
     [ -e "$OUTPUT" ] && rm -rf "$OUTPUT"
     mkdir -p "$OUTPUT"
 
-    VMNAME="ktest-$OWNER"
+    KOPT+=("ktest.hostname=$VMNAME")
     KERNEL_VOLUME="kernel-$OWNER"
     INITRAMFS_VOLUME="initramfs-$OWNER"
     CRASH_VOLUME="crashes-$OWNER"
