@@ -394,6 +394,15 @@ ktest::unlock(){
     logq virsh vol-delete ktest-$HOST.lock $POOL || true
 }
 
+adddev::lock(){
+    notify "Wait for ktest-adddev-$HOST.lock"
+    while ! logq virsh vol-create-as $POOL ktest-adddev-$HOST.lock 0; do sleep 1; done
+}
+
+adddev::unlock(){
+    logq virsh vol-delete ktest-adddev-$HOST.lock $POOL || true
+}
+
 ktest::exit(){
     ktest::unlock
     for dev in "${RDMA_DEVICES[@]}"; do
@@ -402,6 +411,7 @@ ktest::exit(){
     for net in "${NETWORKS_LIST[@]}"; do
         rdma::net::unlock "$net"
     done
+    adddev::unlock
     clean
 }
 
@@ -951,7 +961,9 @@ while [ -z "$STARTED" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
         dev_count=0
         for (( i=0; i < "${#CLUSTER_ID[*]}"; i++ )) do
             for (( j=0; j < "$PCI_DEVICES_IN_NET"; j++ )) do
+                adddev::lock
                 rdma::network "${CLUSTER_ID[i]}" "${RDMA_DEVICES[dev_count]}"
+                adddev::unlock
                 dev_count=$(($dev_count+1))
             done
         done
