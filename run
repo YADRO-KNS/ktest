@@ -106,10 +106,13 @@ options:
     -m, --module MODULE            install a kernel module into initramfs
     -d, --directory LOCAL:REMOTE   pass a directory and mount it under a path
     -D, --disk DISKSPEC            Make virtio-scsi/virtio-blk disk that's avaialble from the VM
-                                   DISKSPEC must have the format: NAME:<scsi|blk>:SIZE,
+                                   DISKSPEC must have the format: NAME:<scsi|blk>:SIZE:[SECTOR_SIZE],
                                    Where NAME is alphanumeric that'll be used as disk serial,
                                    SIZE is a number following G, M or K suffix (Gigabytes,
-                                   Megabytes or Kilobytes, respectively).
+                                   Megabytes or Kilobytes, respectively),
+                                   SECTOR_SIZE is optional parameter that specifies logical block size
+                                   and physical block size the disk will report to the VM,
+                                   valid SECTOR_SIZE values are 512 1024 2048 4096.
     -n, --net NETSPEC              Configure a virtio-net interface and
                                    optionally acquire IPv4/IPv6 address from DHCP server.
                                    NETSPEC must have the format: IFSPEC[:mac=ADDR][:dhcp]
@@ -142,14 +145,18 @@ EOF
 }
 
 check_diskspec() {
+    local valid_sector_size=(512 1024 2048 4096)
     local disk
     IFS=':' read -ra disk <<< "$1"
-    [ ${#disk[@]} -eq 3 ] || return $?
-    [[ ${disk[0]} =~ ^[[:alnum:]]+$ ]] || return $?
+    [ ${#disk[@]} -eq 3 -o ${#disk[@]} -eq 4 ] || return $?
+    [[ ${disk[0]} =~ ^[[:alnum:]_]+$ ]] || return $?
     [ "${disk[1]}" == blk -o "${disk[1]}" == scsi ] || return $?
     [[ ${disk[2]} =~ ^[[:digit:]]+[G|M|K]{0,1}$ ]] || return $?
     [[ " ${DISKNAMES[@]} " =~ " ${disk[0]}" ]] && return 1
     DISKNAMES+=("${disk[0]}")
+    if [ ${#disk[@]} -eq 4 ]; then
+        [[ " ${valid_sector_size[@]} " =~ " ${disk[3]} " ]] || {  echo "ERROR: Invalid sector size: ${disk[3]}" >&2; return 1; }
+    fi
     return
 }
 
@@ -184,11 +191,6 @@ parse_options(){
             DIRS+=("$2")
             shift 2
         elif [ "$1" == "-D" -o "$1" == "--disk" ]; then
-            if ! check_diskspec $2; then
-                echo "ERROR: Invalid DISKSPEC format: $2" >&2
-                usage
-                exit 1
-            fi
             DISKS+=("$2")
             shift 2
         elif [ "$1" == "-G" -o "$1" == "--gdb" ]; then
@@ -421,6 +423,14 @@ make_xml(){
         if [ -n "${v[4]}" ]; then
             xml ed --inplace                                                  \
                 -s '//devices/disk[last()]' -t elem -n serial -v "${v[4]}"    \
+                "$xml"
+        fi
+
+        if [ -n "${v[5]}" ]; then
+            xml ed --inplace                                                                    \
+                -s '//devices/disk[last()]' -t elem -n blockio -v ''                            \
+                -a '//devices/disk[last()]/blockio' -t attr -n logical_block_size -v "${v[5]}"  \
+                -a '//devices/disk[last()]/blockio' -t attr -n physical_block_size -v "${v[5]}" \
                 "$xml"
         fi
     done
@@ -659,10 +669,15 @@ for dir in "${DIRS[@]}"; do
 done
 
 for d in "${DISKS[@]}"; do
+    if ! check_diskspec $d; then
+        echo "ERROR: Invalid DISKSPEC format: $d" >&2
+        usage
+        exit 1
+    fi
     IFS=':' read -ra disk <<< "$d"
     disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
     log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
-    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}:${disk[3]}")
 done
 
 notify "Discover hypervisor..."
