@@ -97,7 +97,7 @@ options:
     -c, --clean                    remove kernel and initramfs volumes after VM
                                    shutdown
     --shared                       using scsi disks as shared disk (The qcow2
-                                   format is also replaced with raw.) Work if -f is enabled.
+                                   format is also replaced with raw.)
     -G, --gdb [HOST]:PORT          Enable QEMU GDB stub via HOST:PORT
     -k, --kopt PARAM               pass a kernel option
     -K, --keep                     don't shutdown VM immediately
@@ -494,15 +494,17 @@ make_xml(){
 }
 
 vm::vol::upload(){
-    if ! logq virsh vol-info "$1" --pool "$POOL"; then
-        notify "Create volume $1 on $POOL"
-        local size=$(wc -c < "$2")
-        log virsh vol-create-as --format "$3" "$POOL" "$1" $size
-    fi
-    if cache::file::outdated "$2" "$HOST" "$POOL" "$1" || [ -n "$FORCE" ]; then
-        notify "Upload $2 to hypervisor"
-        log virsh vol-upload "$1" "$2" --pool "$POOL"
-        cache::file::update "$2" "$HOST" "$POOL" "$1"
+    if [ "$4" != "scsi" ] || [ -z "$NODE" ] || [ "$NODE" == "0" ] || [ -z "$SHARED" ]; then
+	    if ! logq virsh vol-info "$1" --pool "$POOL"; then
+		    notify "Create volume $1 on $POOL"
+		    local size=$(wc -c < "$2")
+		    log virsh vol-create-as --format "$3" "$POOL" "$1" $size
+	    fi
+	    if  cache::file::outdated "$2" "$HOST" "$POOL" "$1" || [ -n "$FORCE" ]; then
+		    notify "Upload $2 to hypervisor"
+		    log virsh vol-upload "$1" "$2" --pool "$POOL"
+		    cache::file::update "$2" "$HOST" "$POOL" "$1"
+	    fi
     fi
 }
 
@@ -691,13 +693,13 @@ done
 for d in "${DISKS[@]}"; do
     IFS=':' read -ra disk <<< "$d"
     if [ -n "$SHARED" ]; then
-            disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.raw"
-	        log qemu-img create -f raw "$disk_path" ${disk[2]}
-	        VOLUMES+=("disk-${disk[0]}-$DISK_OWNER:$disk_path:raw:${disk[1]}:${disk[0]}")
+	    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.raw"
+	    log qemu-img create -f raw "$disk_path" ${disk[2]}
+	    VOLUMES+=("disk-${disk[0]}-$DISK_OWNER:$disk_path:raw:${disk[1]}:${disk[0]}")
     else
-	        disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
-            log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
-            VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+	    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow"
+	    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
+	    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
     fi
 done
 
@@ -739,6 +741,7 @@ if [ -n "$GDB_ADDRESS" ]; then
     xml::gdb::set "$XML_NAME" "$GDB_ADDRESS"
 fi
 
+while  [ -n "$NODE" ] && [ "$NODE" -ne "0" ] && ! [[ -f $USR_CACHE_DIR/ktest-0-$DISK_OWNER/start.log ]]; do sleep 1; done
 ktest::lock
 trap ktest::exit EXIT
 TAKEN_PORTS="$USR_CACHE_DIR/$VMNAME/port.list"
