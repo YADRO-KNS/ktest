@@ -21,7 +21,8 @@ declare -a DRACUT_OPTS
 declare -a KMODS
 CURDIR=$(dirname $(realpath "${BASH_SOURCE[0]}"))
 GUEST="$CURDIR/guest"
-KMODS+=(virtio_pci virtio_net virtio_blk virtio_scsi virtio_console virtio-rng sg sd_mod)
+KDUMP_BASE_KMODS+=(virtio_pci virtio_net virtio_blk virtio_console)
+KMODS+=(${KDUMP_BASE_KMODS[@]} virtio_scsi virtio-rng sg sd_mod)
 MODULES=(base systemd terminfo)
 INSTALL=(zcat zless zgrep grep gzip cut sed awk tr ps tar nproc)
 source "$CURDIR/lib"
@@ -116,6 +117,24 @@ check_progs() {
     fi
 }
 
+check_kmods() {
+    local kmod_dir="/lib/modules/$KVER"
+    local notfound=0
+    for mod in "$@"; do
+        # Handle dash to underscore aliasing
+        mod=$(sed 's|[-_]|\[-_\]|' <<< "$mod")
+        grep -qw "$mod" "$kmod_dir/modules."{builtin,dep} && continue
+        # test if a built-in alias is requested
+        tr '\0' '\n' < "$kmod_dir/modules.builtin.modinfo" | \
+           grep -qwE "\w+\.alias=$mod" && continue
+        echo "ERROR: Kernel module $mod is missing in $kmod_dir"
+        ((notfound++))
+    done
+    if ((notfound > 0)); then
+        die
+    fi
+}
+
 libdirs() {
     local -a libdirs
     if [[ $(ldd /bin/sh) == */lib64/* ]] && [ -d /lib64 ]; then
@@ -158,6 +177,7 @@ if [ -n "$KDUMP" ]; then
     KDUMP_INSTALL=(gzip nproc makedumpfile scp grep cut tar)
 
     check_progs "${KDUMP_INSTALL[@]}"
+    check_kmods "${KDUMP_BASE_KMODS[@]}"
     dracut -N --force                                                         \
            "${DRACUT_OPTS[@]}"                                                \
            -m "base"                                                          \
@@ -165,7 +185,7 @@ if [ -n "$KDUMP" ]; then
            --install "${KDUMP_INSTALL[*]}"                                    \
            --include $emptydir /crashes                                       \
            --include "$GUEST/collect-crash" /.profile                         \
-           --add-drivers="virtio_pci virtio_net virtio_blk virtio_console"    \
+           --drivers="${KDUMP_BASE_KMODS[*]}"                                 \
            $VERBOSE                                                           \
            "$bootdir/initrd-kdump" "$KVER"
 
@@ -174,6 +194,7 @@ if [ -n "$KDUMP" ]; then
 fi
 
 check_progs "${INSTALL[@]}"
+check_kmods "${KMODS[@]}"
 export DRACUT_RESOLVE_DEPS=1
 dracut -N --force                                                             \
        "${DRACUT_OPTS[@]}"                                                    \
@@ -193,7 +214,7 @@ dracut -N --force                                                             \
        --include $CURDIR/ktest.sh /bin/ktest                                  \
        --include $CURDIR/disk-by-serial /bin/disk-by-serial                   \
        "${INCLUDES[@]}"                                                       \
-       --add-drivers="${KMODS[*]}"                                            \
+       --drivers="${KMODS[*]}"                                                \
        $VERBOSE                                                               \
        "$OUT" "$KVER"
 
