@@ -1,4 +1,5 @@
 #!/bin/sh
+mkdir -p /var/log
 log=/var/log/dhclient-script.log
 case $reason in
     PREINIT|PREINIT6)

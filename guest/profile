@@ -33,6 +33,8 @@ if [ -n "$HOSTPWD" ]; then
     export KTEST_PWD="$HOSTPWD"
 fi
 
+HOSTNAME=$(grep -oP 'ktest.hostname=\K\S+' < /proc/cmdline)
+
 ENTRY_POINT=$(grep -oP 'ktest.start=\K\S+' < /proc/cmdline)
 export KTEST_OUTPUT=/ktest/out
 mkdir -p "$KTEST_OUTPUT"

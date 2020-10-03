@@ -1,0 +1,6 @@
+<network>
+    <name>NAME</name>
+    <uuid>UUID</uuid>
+    <forward mode='hostdev' managed='yes'>
+    </forward>
+</network>
