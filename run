@@ -96,6 +96,8 @@ options:
     -f, --force                    stop running VM
     -c, --clean                    remove kernel and initramfs volumes after VM
                                    shutdown
+    --shared                       using scsi disks as shared disk (The qcow2
+                                   format is also replaced with raw.)
     -G, --gdb [HOST]:PORT          Enable QEMU GDB stub via HOST:PORT
     -k, --kopt PARAM               pass a kernel option
     -K, --keep                     don't shutdown VM immediately
@@ -225,6 +227,9 @@ parse_options(){
         elif [ "$1" == "-K" -o "$1" == "--keep" ]; then
             [ -t 1 ] && KOPT+=("ktest.keep")
             shift
+        elif [ "$1" == "--shared" ]; then
+            SHARED=1
+            shift
         elif [ "$1" == "--disable-kdump" ]; then
             DISABLE_KDUMP=y
             shift
@@ -259,6 +264,7 @@ parse_options(){
         exit 1
     fi
 
+    DISK_OWNER=$OWNER
     KERNEL="${POSITIONAL[0]}"
     [ -r "$KERNEL" ] || die "Can't read kernel: $KERNEL"
     [ -n "$ENTRY_POINT" ] && KOPT+=("ktest.start=$ENTRY_POINT")
@@ -394,28 +400,52 @@ make_xml(){
             local bus=scsi
             ((sidx++))
         fi
-        xml ed --inplace                                                      \
-            -s //devices -t elem -n disk -v ''                                \
-            -a '//devices/disk[last()]' -t attr -n type -v volume             \
-            -a '//devices/disk[last()]' -t attr -n device -v disk             \
-            -s '//devices/disk[last()]' -t elem -n driver -v ''               \
-            -a '//devices/disk[last()]/driver' -t attr -n name -v qemu        \
-            -a '//devices/disk[last()]/driver' -t attr -n type -v "${v[2]}"   \
-            -s '//devices/disk[last()]' -t elem -n source -v ''               \
-            -a '//devices/disk[last()]/source' -t attr -n pool -v "$4"        \
-            -a '//devices/disk[last()]/source' -t attr -n volume -v "${v[0]}" \
-            -s '//devices/disk[last()]' -t elem -n target -v ''               \
-            -a '//devices/disk[last()]/target' -t attr -n bus -v $bus         \
-            -a '//devices/disk[last()]/target' -t attr -n dev -v $dev         \
-            "$xml"
+
+        if [ -n "$SHARED" ] && [ "$bus" == "scsi" ] && [ "$NODE" -ne "2" ]; then
+                xml ed --inplace                                                                                  \
+                        -s //devices -t elem -n disk -v ''                                                        \
+                        -a '//devices/disk[last()]' -t attr -n type -v file                                       \
+                        -a '//devices/disk[last()]' -t attr -n device -v disk                                     \
+                        -a '//devices/disk[last()]' -t attr -n snapshot -v no                                     \
+                        -s '//devices/disk[last()]' -t elem -n driver -v ''                                       \
+                        -a '//devices/disk[last()]/driver' -t attr -n name -v qemu                                \
+                        -a '//devices/disk[last()]/driver' -t attr -n type -v "${v[2]}"                           \
+                        -a '//devices/disk[last()]/driver' -t attr -n cache -v writeback                          \
+                        -a '//devices/disk[last()]/driver' -t attr -n error_policy -v stop                        \
+                        -s '//devices/disk[last()]' -t elem -n source -v ''                                       \
+                        -a '//devices/disk[last()]/source' -t attr -n file -v /var/lib/libvirt/images/"${v[0]}"   \
+                        -s '//devices/disk[last()]' -t elem -n backingStore -v ''                                 \
+                        -s '//devices/disk[last()]' -t elem -n target -v ''                                       \
+                        -a '//devices/disk[last()]/target' -t attr -n bus -v $bus                                 \
+                        -a '//devices/disk[last()]/target' -t attr -n dev -v $dev                                 \
+                        -s '//devices/disk[last()]' -t elem -n shareable -v ''                                    \
+                        -s '//devices/disk[last()]' -t elem -n vendor -v 'YADRO'                                  \
+                        -s '//devices/disk[last()]' -t elem -n product -v 'shared_disk'                           \
+                        "$xml"
+        else
+                xml ed --inplace                                                          \
+                        -s //devices -t elem -n disk -v ''                                \
+                        -a '//devices/disk[last()]' -t attr -n type -v volume             \
+                        -a '//devices/disk[last()]' -t attr -n device -v disk             \
+                        -s '//devices/disk[last()]' -t elem -n driver -v ''               \
+                        -a '//devices/disk[last()]/driver' -t attr -n name -v qemu        \
+                        -a '//devices/disk[last()]/driver' -t attr -n type -v "${v[2]}"   \
+                        -s '//devices/disk[last()]' -t elem -n source -v ''               \
+                        -a '//devices/disk[last()]/source' -t attr -n pool -v "$4"        \
+                        -a '//devices/disk[last()]/source' -t attr -n volume -v "${v[0]}" \
+                        -s '//devices/disk[last()]' -t elem -n target -v ''               \
+                        -a '//devices/disk[last()]/target' -t attr -n bus -v $bus         \
+                        -a '//devices/disk[last()]/target' -t attr -n dev -v $dev         \
+                        "$xml"
+        fi
 
         if [ "$bus" == "scsi" ]; then
-            xml ed --inplace                                                      \
-                -s '//devices/disk[last()]' -t elem -n address -v ''              \
-                -a '//devices/disk[last()]/address' -t attr -n controller -v '0'  \
-                -a '//devices/disk[last()]/address' -t attr -n type -v 'drive'    \
-                -a '//devices/disk[last()]/address' -t attr -n unit -v $sidx      \
-                "$xml"
+                xml ed --inplace                                                          \
+                        -s '//devices/disk[last()]' -t elem -n address -v ''              \
+                        -a '//devices/disk[last()]/address' -t attr -n controller -v '0'  \
+                        -a '//devices/disk[last()]/address' -t attr -n type -v 'drive'    \
+                        -a '//devices/disk[last()]/address' -t attr -n unit -v $sidx      \
+                        "$xml"
         fi
 
         if [ -n "${v[4]}" ]; then
@@ -464,15 +494,17 @@ make_xml(){
 }
 
 vm::vol::upload(){
-    if ! logq virsh vol-info "$1" --pool "$POOL"; then
-        notify "Create volume $1 on $POOL"
-        local size=$(wc -c < "$2")
-        log virsh vol-create-as --format "$3" "$POOL" "$1" $size
-    fi
-    if cache::file::outdated "$2" "$HOST" "$POOL" "$1" || [ -n "$FORCE" ]; then
-        notify "Upload $2 to hypervisor"
-        log virsh vol-upload "$1" "$2" --pool "$POOL"
-        cache::file::update "$2" "$HOST" "$POOL" "$1"
+    if [ "$4" != "scsi" ] || [ -z "$NODE" ] || [ "$NODE" == "0" ] || [ -z "$SHARED" ]; then
+	    if ! logq virsh vol-info "$1" --pool "$POOL"; then
+		    notify "Create volume $1 on $POOL"
+		    local size=$(wc -c < "$2")
+		    log virsh vol-create-as --format "$3" "$POOL" "$1" $size
+	    fi
+	    if  cache::file::outdated "$2" "$HOST" "$POOL" "$1" || [ -n "$FORCE" ]; then
+		    notify "Upload $2 to hypervisor"
+		    log virsh vol-upload "$1" "$2" --pool "$POOL"
+		    cache::file::update "$2" "$HOST" "$POOL" "$1"
+	    fi
     fi
 }
 
@@ -660,9 +692,17 @@ done
 
 for d in "${DISKS[@]}"; do
     IFS=':' read -ra disk <<< "$d"
-    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
-    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
-    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+    if [ "$NODE" -ne "2" ] || [ -z "$NODE" ]; then
+	    if [ -n "$SHARED" ]; then
+		    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.raw"
+		    log qemu-img create -f raw "$disk_path" ${disk[2]}
+		    VOLUMES+=("disk-${disk[0]}-$DISK_OWNER:$disk_path:raw:${disk[1]}:${disk[0]}")
+	    else
+		    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
+		    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
+		    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+	    fi
+    fi
 done
 
 notify "Discover hypervisor..."
@@ -703,6 +743,7 @@ if [ -n "$GDB_ADDRESS" ]; then
     xml::gdb::set "$XML_NAME" "$GDB_ADDRESS"
 fi
 
+while  [ -n "$NODE" ] && [ "$NODE" -ne "0" ] && ! [[ -f $USR_CACHE_DIR/ktest-0-$DISK_OWNER/start.log ]]; do sleep 1; done
 ktest::lock
 trap ktest::exit EXIT
 TAKEN_PORTS="$USR_CACHE_DIR/$VMNAME/port.list"
