@@ -1,5 +1,5 @@
 # ktest
-Example to To run rdma-cluster
+Example to to run rdma-cluster
 
 PHYSICAL_FUNCTIONS=(pci_0004_01_00_0 pci_0004_01_00_1)
 PCI_CLIEN_COUNT=3
