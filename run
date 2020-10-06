@@ -401,7 +401,7 @@ make_xml(){
             ((sidx++))
         fi
 
-        if [ -n "$SHARED" ] && [ "$bus" == "scsi" ]; then
+        if [ -n "$SHARED" ] && [ "$bus" == "scsi" ] && [ "$NODE" -ne "2" ]; then
                 xml ed --inplace                                                                                  \
                         -s //devices -t elem -n disk -v ''                                                        \
                         -a '//devices/disk[last()]' -t attr -n type -v file                                       \
@@ -692,14 +692,16 @@ done
 
 for d in "${DISKS[@]}"; do
     IFS=':' read -ra disk <<< "$d"
-    if [ -n "$SHARED" ]; then
-	    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.raw"
-	    log qemu-img create -f raw "$disk_path" ${disk[2]}
-	    VOLUMES+=("disk-${disk[0]}-$DISK_OWNER:$disk_path:raw:${disk[1]}:${disk[0]}")
-    else
-	    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow"
-	    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
-	    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+    if [ "$NODE" -ne "2" ] || [ -z "$NODE" ]; then
+	    if [ -n "$SHARED" ]; then
+		    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.raw"
+		    log qemu-img create -f raw "$disk_path" ${disk[2]}
+		    VOLUMES+=("disk-${disk[0]}-$DISK_OWNER:$disk_path:raw:${disk[1]}:${disk[0]}")
+	    else
+		    disk_path="$USR_CACHE_DIR/$VMNAME/disk-${disk[0]}.qcow2"
+		    log qemu-img create -f qcow2 "$disk_path" ${disk[2]}
+		    VOLUMES+=("disk-${disk[0]}-$OWNER:$disk_path:qcow2:${disk[1]}:${disk[0]}")
+	    fi
     fi
 done
 
