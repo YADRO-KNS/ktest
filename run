@@ -32,6 +32,7 @@ DISKS=("${DISKS[@]}")
 INSTALL=("${INSTALL[@]}")
 INCLUDES=("${INCLUDES[@]}")
 MODULES=("${MODULES[@]}")
+PCI_PASSTHROUGH_DEVICE=("${PCI_PASSTHROUGH_DEVICE[@]}")
 BASE_CHANNEL_PORT=10000
 N_CHANNEL_PORTS=999
 : ${MEMORY:=512}
@@ -124,6 +125,7 @@ options:
     --uri URI                      set URI to hypervisor
     --pool POOL                    pool to store the kernel and initramfs
     --owner OWNER                  owner of the VM
+    --pci-passthrough-sn LIST      Serial numbers of PCI devices to passthrough from hypervisor to VM
     -t, --timeout TIMEOUT          VM timeout
     --kdump-timeout TIMEOUT        Specifies time limit for kernel dump.
                                    A VM is shut down if it doesn't manage to
@@ -239,6 +241,9 @@ parse_options(){
             shift 2
         elif [ "$1" == "--owner" ]; then
             OWNER="$2"
+            shift 2
+        elif [ "$1" == "--pci-passthrough-sn" ]; then
+            PCI_PASSTHROUGH_DEVICE+=("$2")
             shift 2
         elif [ "$1" == "-t" -o "$1" == "--timeout" ]; then
             VM_TIMEOUT="$2"
@@ -459,6 +464,33 @@ make_xml(){
         local dhcp="ktest.dhcp=$(join_by ',' ${DHCP_IFACES[@]})"
     fi
     xml ed --inplace --update "/domain/os/cmdline" -v "unknown_nmi_panic console=$console $dhcp ${*:9}" "$xml"
+
+    if [ ${#PCI_PASSTHROUGH_DEVICE[@]} -ne 0 ]; then
+         xml ed --inplace                                              \
+                -s '//devices' -t elem -n hostdev -v ""                \
+                -a '//devices/hostdev' -t attr -n mode -v "subsystem"  \
+                -a '//devices/hostdev' -t attr -n type -v "pci"        \
+                -a '//devices/hostdev' -t attr -n managed -v "yes"     \
+                -s '//devices/hostdev' -t elem -n source -v ""         \
+                "$xml"
+        for dev in "${PCI_PASSTHROUGH_DEVICE[@]}"
+        do
+            local hypervisor=$(echo $LIBVIRT_DEFAULT_URI | cut -d"@" -f2 | cut -d"/" -f1)
+            local pci_address=$(ssh root@$hypervisor "lspci -v | grep -B 50 -e \"Device Serial Number ${dev}\" | awk -e '\$1 ~ /[0-9]/ {print \$1}' | tail -n 1 | tr . :")
+            [[ -z "$pci_address" ]] && { echo "No PCI device with specified Serial Number" ; exit 1; }
+            local domain=$(echo $pci_address | awk -F":" '{print "0x"$1}')
+            local bus=$(echo $pci_address | awk -F":" '{print "0x"$2}')
+            local slot=$(echo $pci_address | awk -F":" '{print "0x"$3}')
+            local function=$(echo $pci_address | awk -F":" '{print "0x"$4}')
+            xml ed --inplace                                                         \
+                -s '//devices/hostdev/source' -t elem -n address -v ""               \
+                -a '//devices/hostdev/source/address' -t attr -n domain -v "$domain" \
+                -a '//devices/hostdev/source/address' -t attr -n bus -v "$bus"       \
+                -a '//devices/hostdev/source/address' -t attr -n slot -v "$slot"     \
+                -a '//devices/hostdev/source/address' -t attr -n function -v "$function" \
+                "$xml"
+        done
+    fi
 
     echo "$xml"
 }
