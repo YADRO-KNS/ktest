@@ -379,7 +379,8 @@ make_xml(){
     xml ed --inplace --update "/domain/@type" -v "$3" "$xml"
     xml ed --inplace --update "/domain/os/kernel" -v "$5" "$xml"
     xml ed --inplace --update "/domain/os/initrd" -v "$6" "$xml"
-    IFS='|' read -ra vdefs <<<"$7"
+    xml ed --inplace --update "/domain/devices/serial/log/@file" -v "$7" "$xml"
+    IFS='|' read -ra vdefs <<<"$8"
     local vidx=1
     local sidx=1
     for vdef in "${vdefs[@]}"; do
@@ -425,7 +426,7 @@ make_xml(){
         fi
     done
 
-    IFS='|' read -ra idefs <<<"$8"
+    IFS='|' read -ra idefs <<<"$9"
     local ifix=0
     for idef in "${idefs[@]}"; do
         IFS=':' read -ra i <<<"$idef"
@@ -686,6 +687,8 @@ else
     DOM_TYPE=qemu
 fi
 
+SERIAL_LOG='/tmp/'$VMNAME'.log'
+
 notify "Prepare VM config"
 XML_NAME=$(make_xml "$VMNAME"                         \
                     "$HV_ARCH"                        \
@@ -693,6 +696,7 @@ XML_NAME=$(make_xml "$VMNAME"                         \
                     "$POOL"                           \
                     "$KERNEL_PATH"                    \
                     "$INITRAMFS_PATH"                 \
+                    "$SERIAL_LOG"                     \
                     "$(join_by '|' "${VOLUMES[@]}")"  \
                     "$(join_by '|' "${IFACES[@]}")"   \
                     "${KOPT[@]}")
@@ -782,7 +786,9 @@ else
       sleep 1
       state=$(virsh domstate "$VMNAME")
   done
+  ssh $HOST -C "cat $SERIAL_LOG"
 fi
+ssh $HOST -C "rm $SERIAL_LOG"
 ktest::lock
 log virsh vol-download $PORT_LIST_VOL "$TAKEN_PORTS" $POOL
 sed -i -- "/$CHANNEL_PORT/d" $TAKEN_PORTS
