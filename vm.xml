@@ -14,6 +14,7 @@
     <devices>
       <serial type='pty'>
         <target port='0'/>
+        <log file="/tmp/serial.log" append="off"/>
       </serial>
       <channel type="tcp">
           <source mode="bind" host="0.0.0.0" service="TBD"/>
